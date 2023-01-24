@@ -59,7 +59,7 @@ LogicalResult mlir::rock::calculateKBlockNum(const ConvolutionDims &convDims,
   // not more than n
   gemmKBlock = std::min(convDims.n, gemmKBlock);
   // not less than 1
-  gemmKBlock = std::max((__int64_t)1, gemmKBlock);
+  gemmKBlock = std::max((int64_t)1, gemmKBlock);
 
   nKBlock = gemmKBlock;
   return success();
