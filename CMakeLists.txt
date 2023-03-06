@@ -9,6 +9,8 @@ if(POLICY CMP0116)
   cmake_policy(SET CMP0116 OLD)
 endif()
 
+set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "")
+
 # Adapted from https://blog.kitware.com/cmake-and-the-default-build-type/
 set(default_build_type "Release")
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -79,6 +81,10 @@ endif()
 
 # Set up the build for the LLVM/MLIR git-submodule
 include(cmake/llvm-project.cmake)
+
+if(MSVC)
+    add_definitions(-D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING)
+endif()
 
 # Set up the build for the official MLIR 'standalone' example
 #add_subdirectory(mlir-standalone-example)
