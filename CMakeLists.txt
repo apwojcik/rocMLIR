@@ -47,9 +47,11 @@ set(ROCMLIR_LIB_DIR "${CMAKE_CURRENT_BINARY_DIR}/lib" CACHE PATH "")
 message(STATUS "LLVM_EXTERNAL_BIN_DIR: ${LLVM_EXTERNAL_BIN_DIR}")
 message(STATUS "ROCMLIR_BIN_DIR: ${ROCMLIR_BIN_DIR}")
 
-# Update the build-tree RPATH
-set(CMAKE_BUILD_RPATH "${ROCMLIR_LIB_DIR};${LLVM_EXTERNAL_LIB_DIR}")
-message(STATUS "CMAKE_BUILD_RPATH: ${CMAKE_BUILD_RPATH}")
+if(NOT WIN32)
+  # Update the build-tree RPATH
+  set(CMAKE_BUILD_RPATH "${ROCMLIR_LIB_DIR};${LLVM_EXTERNAL_LIB_DIR}")
+  message(STATUS "CMAKE_BUILD_RPATH: ${CMAKE_BUILD_RPATH}")
+endif()
 
 if(BUILD_MIXR_TARGET)
   set(BUILD_FAT_LIBROCKCOMPILER ON CACHE BOOL "Build static rockCompiler library")
@@ -82,7 +84,7 @@ endif()
 # Set up the build for the LLVM/MLIR git-submodule
 include(cmake/llvm-project.cmake)
 
-if(MSVC)
+if(WIN32)
     add_definitions(-D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING)
 endif()
 
