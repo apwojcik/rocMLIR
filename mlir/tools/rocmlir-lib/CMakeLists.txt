@@ -43,7 +43,7 @@ if(BUILD_FAT_LIBROCKCOMPILER)
 
   set(PACKAGE_NAME ${CMAKE_PROJECT_NAME})
   set(LIBRARY_NAME rockCompiler)
-  set(COMPONENT_NAME ${CMAKE_STATIC_LIBRARY_PREFIX}${LIBRARY_NAME})
+  set(COMPONENT_NAME ${LIBRARY_NAME})
 
   if (MSVC)
     add_library(${LIBRARY_NAME} INTERFACE)
@@ -275,6 +275,8 @@ if(BUILD_FAT_LIBROCKCOMPILER)
               $<INSTALL_INTERFACE:\${_IMPORT_PREFIX}/lib/${__library}>)
     endforeach()
 
+    add_dependencies(${LIBRARY_NAME} MLIRRockThin)
+
     install(TARGETS MLIRRockThin
             DESTINATION lib
             COMPONENT ${COMPONENT_NAME})
@@ -282,32 +284,41 @@ if(BUILD_FAT_LIBROCKCOMPILER)
     install(FILES ${__install_libraries}
          DESTINATION lib/${PACKAGE_NAME}/llvm
          COMPONENT ${COMPONENT_NAME})
+
+    unset(__install_libraries)
+
   else()
 
     set(output_archive_dummy_file ${CMAKE_CURRENT_BINARY_DIR}/${LIBRARY_NAME}.dummy.cpp)
     file(TOUCH ${output_archive_dummy_file})
-    set(full_output_path ${ROCMLIR_LIB_DIR}/lib${LIBRARY_NAME}.a)
+    set(full_output_path ${ROCMLIR_LIB_DIR}/${LIBRARY_NAME}${CMAKE_STATIC_LIBRARY_SUFFIX})
     set(mri_file ${CMAKE_CURRENT_BINARY_DIR}/${LIBRARY_NAME}.mri)
 
     # Step one: construct mri file.
-    add_custom_command(OUTPUT ${LIBRARY_NAME}.mri
-                       COMMAND echo "create ${full_output_path}" >> ${LIBRARY_NAME}.mri
-                       COMMAND for archive in ${ROCMLIR_LIB_DIR}/*.a ${LLVM_EXTERNAL_LIB_DIR}/*.a\;
-                       do echo "addlib $$archive" >> ${LIBRARY_NAME}.mri \; done
-                       COMMAND echo "save" >> ${LIBRARY_NAME}.mri
-                       COMMAND echo "end" >> ${LIBRARY_NAME}.mri)
+    add_custom_command(OUTPUT ${mri_file}
+                       COMMAND echo "create ${full_output_path}" >> ${mri_file}
+                       COMMAND for archive in ${ROCMLIR_LIB_DIR}/*${CMAKE_STATIC_LIBRARY_SUFFIX} ${LLVM_EXTERNAL_LIB_DIR}/*${CMAKE_STATIC_LIBRARY_SUFFIX}\;
+                       do echo "addlib $$archive" >> ${mri_file} \; done
+                       COMMAND echo "save" >> ${mri_file}
+                       COMMAND echo "end" >> ${mri_file}
+                       DEPENDS MLIRRockThin)
 
     # Step two: use mri file to generate the fat library.
     llvm_add_library(${LIBRARY_NAME}
       PARTIAL_SOURCES_INTENDED
       STATIC ${output_archive_dummy_file})
+
+    target_sources(${LIBRARY_NAME} PRIVATE ${mri_file})
+
     add_custom_command(TARGET ${LIBRARY_NAME}
                        POST_BUILD
                        COMMAND ${CMAKE_AR} -M < ${mri_file})
-    add_dependencies(${LIBRARY_NAME} ${LIBRARY_NAME}.mri)
-  endif()
 
-  add_dependencies(${LIBRARY_NAME} MLIRRockThin)
+    unset(mri_file)
+    unset(output_archive_dummy_file)
+    unset(full_output_path)
+
+  endif()
 
   # Install Miir.h to ${CMAKE_INSTALL_PREFIX}/include/${PACKAGE_NAME}/
   # as part of component libroCompiler
