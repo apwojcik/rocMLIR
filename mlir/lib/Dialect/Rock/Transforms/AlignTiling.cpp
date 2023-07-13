@@ -138,7 +138,10 @@ static Value applyTransforms(PatternRewriter &b, ThreadwiseWriteAllOp storeOp,
   src = applyViewsOnDest(b, loc, src, relativeViewsOnStore);
 
   // 2.2. load into registers
+  Value bid = b.createOrFold<rock::WorkgroupIdOp>(loc, b.getIndexType());
+  Value tid = b.createOrFold<rock::WorkitemIdOp>(loc, b.getIndexType());
   b.create<ThreadwiseReadIntoOp>(loc, src, alloc, storeOp.getExtraViews(),
+                                 /*extraIndices=*/ValueRange{bid, tid},
                                  storeOp.getForceUnroll(),
                                  storeOp.getUseIndexDiffs());
   return alloc;
@@ -502,7 +505,8 @@ LogicalResult MemcpyRewritePattern::matchAndRewrite(memref::CopyOp copy,
       b.setInsertionPoint(twWriteAllOp);
 
       // 1. replace memref.copy with rock.threadwise_write_all
-      target = applyViewsOnDest(b, loc, target, views);
+      target = cast<TypedValue<BaseMemRefType>>(
+          applyViewsOnDest(b, loc, target, views));
       twWriteAllOp.getDestMutable().assign(target);
       // twWriteAllOp->moveAfter(target.getDefiningOp());
 
@@ -593,7 +597,8 @@ ReduceRewritePattern::matchAndRewrite(rock::ReduceOp reduceOp,
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPoint(threadwiseWriteOp);
     TypedValue<ShapedType> reduceOut = reduceOp.getOut();
-    reduceOut = applyViewsOnDest(rewriter, loc, reduceOut, views);
+    reduceOut = cast<TypedValue<ShapedType>>(
+        applyViewsOnDest(rewriter, loc, reduceOut, views));
     threadwiseWriteOp.getDestMutable().assign(reduceOut);
     threadwiseWriteOp.setStoreMethodAttr(stMethod);
   }

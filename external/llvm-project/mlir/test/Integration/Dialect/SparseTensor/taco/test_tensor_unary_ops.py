@@ -1,4 +1,4 @@
-# RUN: SUPPORTLIB=%linalg_test_lib_dir/%prefix_mlir_c_runner_utils%shlibext %PYTHON %s | FileCheck %s
+# RUN: env SUPPORTLIB=%mlir_c_runner_utils %PYTHON %s | FileCheck %s
 
 import numpy as np
 import os

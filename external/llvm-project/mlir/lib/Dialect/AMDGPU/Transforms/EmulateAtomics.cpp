@@ -65,7 +65,7 @@ static void patchOperandSegmentSizes(ArrayRef<NamedAttribute> attrs,
       newAttrs.push_back(attr);
       continue;
     }
-    auto segmentAttr = attr.getValue().cast<DenseI32ArrayAttr>();
+    auto segmentAttr = cast<DenseI32ArrayAttr>(attr.getValue());
     MLIRContext *context = segmentAttr.getContext();
     DenseI32ArrayAttr newSegments;
     switch (action) {
@@ -128,7 +128,7 @@ LogicalResult RawBufferAtomicByCasPattern<AtomicOp, ArithOp>::matchAndRewrite(
 
   Value prevLoadForCompare = prevLoad;
   Value atomicResForCompare = atomicRes;
-  if (auto floatDataTy = dataType.dyn_cast<FloatType>()) {
+  if (auto floatDataTy = dyn_cast<FloatType>(dataType)) {
     Type equivInt = rewriter.getIntegerType(floatDataTy.getWidth());
     prevLoadForCompare =
         rewriter.create<arith::BitcastOp>(loc, equivInt, prevLoad);
@@ -139,7 +139,7 @@ LogicalResult RawBufferAtomicByCasPattern<AtomicOp, ArithOp>::matchAndRewrite(
       loc, arith::CmpIPredicate::eq, atomicResForCompare, prevLoadForCompare);
   rewriter.create<cf::CondBranchOp>(loc, canLeave, afterAtomic, ValueRange{},
                                     loopBlock, atomicRes);
-  rewriter.replaceOp(atomicOp, {});
+  rewriter.eraseOp(atomicOp);
   return success();
 }
 
@@ -152,7 +152,7 @@ void mlir::amdgpu::populateAmdgpuEmulateAtomicsPatterns(
   }
   // gfx9 has no to a very limited support for floating-point min and max.
   if (chipset.majorVersion == 9) {
-    if (chipset.minorVersion >= 0x0a) {
+    if (chipset.minorVersion >= 0x0a && chipset.minorVersion != 0x41) {
       // gfx90a supports f64 max (and min, but we don't have a min wrapper right
       // now) but all other types need to be emulated.
       target.addDynamicallyLegalOp<RawBufferAtomicFmaxOp>(
@@ -162,10 +162,18 @@ void mlir::amdgpu::populateAmdgpuEmulateAtomicsPatterns(
     } else {
       target.addIllegalOp<RawBufferAtomicFmaxOp>();
     }
+    if (chipset.minorVersion == 0x41) {
+      // gfx941 requires non-CAS atomics to be implemented with CAS loops.
+      // The workaround here mirrors HIP and OpenMP.
+      target.addIllegalOp<RawBufferAtomicFaddOp, RawBufferAtomicFmaxOp,
+                          RawBufferAtomicSmaxOp, RawBufferAtomicUminOp>();
+    }
   }
   patterns
       .add<RawBufferAtomicByCasPattern<RawBufferAtomicFaddOp, arith::AddFOp>,
-           RawBufferAtomicByCasPattern<RawBufferAtomicFmaxOp, arith::MaxFOp>>(
+           RawBufferAtomicByCasPattern<RawBufferAtomicFmaxOp, arith::MaxFOp>,
+           RawBufferAtomicByCasPattern<RawBufferAtomicSmaxOp, arith::MaxSIOp>,
+           RawBufferAtomicByCasPattern<RawBufferAtomicUminOp, arith::MinUIOp>>(
           patterns.getContext());
 }
 

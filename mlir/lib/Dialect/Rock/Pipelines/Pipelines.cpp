@@ -21,10 +21,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Dialect/Rock/Pipelines/Pipelines.h"
+#include "mlir/Conversion/ArithToAMDGPU/ArithToAMDGPU.h"
+#include "mlir/Conversion/Fp8ExtToTables/Fp8ExtToTables.h"
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Conversion/RockToGPU/RockToGPU.h"
+#include "mlir/Dialect/AMDGPU/Transforms/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/GPU/Transforms/Passes.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Passes.h"
@@ -34,6 +38,7 @@
 #include "mlir/Conversion/RocMLIRPasses.h"
 #include "mlir/Dialect/Bufferization/Transforms/OneShotAnalysis.h"
 #include "mlir/Dialect/Rock/Passes.h"
+#include "mlir/Dialect/Rock/utility/AmdArchDb.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
@@ -48,7 +53,7 @@ void rock::buildBufferizePipeline(OpPassManager &pm,
                                   const rock::BufferizeOptions &options) {
   bool noRock = options.disableRock;
 
-  // TOSA conversion to rock and/or linalg with async.launch's
+  // TOSA conversion to rock and/or linalg with mhal.launch's
   if (!noRock) {
     // convert tosa.conv2d/matmul to rock.conv2d
     /* rocmlir-opt --tosa-to-tensor --tosa-to-rock --rock-view-to-transform
@@ -96,8 +101,8 @@ void rock::buildBufferizePipeline(OpPassManager &pm,
   bufOpts.allowReturnAllocs = true;
   bufOpts.createDeallocs = noRock;
   bufOpts.bufferizeFunctionBoundaries = true;
-  bufOpts.functionBoundaryTypeConversion =
-      bufferization::LayoutMapOption::IdentityLayoutMap;
+  bufOpts.setFunctionBoundaryTypeConversion(
+      bufferization::LayoutMapOption::IdentityLayoutMap);
   bufOpts.unknownTypeConverterFn =
       [](Value value, Attribute memorySpace,
          const bufferization::BufferizationOptions &options) {
@@ -117,7 +122,7 @@ void rock::buildKernelPipeline(OpPassManager &pm,
    *   --rock-gemm-to-gridwise --rock-regularize
    *   --rock-gridwise-gemm-to-blockwise
    */
-  pm.addPass(rock::createRockAffixTuningParametersPass(
+  pm.addNestedPass<func::FuncOp>(rock::createRockAffixTuningParametersPass(
       rock::RockAffixTuningParametersPassOptions{0, 0,
                                                  options.tuningFallback}));
   pm.addNestedPass<func::FuncOp>(rock::createRockConvToGemmPass());
@@ -138,7 +143,7 @@ void rock::buildKernelPipeline(OpPassManager &pm,
     // rock lowering for reductions
     /* rocmlir-opt --rock-lower-reduce
      */
-    pm.addPass(rock::createRockLowerReducePass());
+    pm.addNestedPass<func::FuncOp>(rock::createRockLowerReducePass());
 
     // rock lowering (block to thread)
     /* rocmlir-opt --rock-lowering-blockwise-gemm-to-threadwise
@@ -163,7 +168,7 @@ void rock::buildKernelPipeline(OpPassManager &pm,
     /* rocmlir-opt --convert-linalg-to-affine-loops --lower-affine
      * --expand-stride-metadata --convert-scf-to-cf
      */
-    pm.addPass(createConvertLinalgToAffineLoopsPass());
+    pm.addNestedPass<func::FuncOp>(createConvertLinalgToAffineLoopsPass());
     pm.addPass(memref::createExpandStridedMetadataPass());
     pm.addPass(createLowerAffinePass());
     pm.addPass(createConvertSCFToCFPass());
@@ -172,16 +177,26 @@ void rock::buildKernelPipeline(OpPassManager &pm,
 
 void rock::buildBackendPipeline(OpPassManager &pm,
                                 const rock::BackendOptions &options) {
-  // lowering ROCDL (LLVM) to binary
+  // lowering ROCDL (LLVM) to binary.
+  // Leave off --convert-arith-to-amdgpu if not targetting gfx94x+.
   /* rocmlir-opt --strip-debuginfo
+   *   --convert-arith-to-amdgpu
+   *   --fp8-ext-to-tables
+   *   "--amdgpu-emulate-atomics=chipset=$chip"
    *   "--convert-gpu-to-rocdl=chipset=$chip index-bitwidth=32"
    *   "--gpu-to-hsaco=triple=$triple chip=$chip features=$features opt-level=3"
    */
   pm.addPass(createStripDebugInfoPass());
-  pm.addPass(createLowerGpuOpsToROCDLOpsPass(
+  AmdArchInfo archInfo = lookupArchInfo(options.chip);
+  if (archInfo.hasFp8ConversionInstrs)
+    pm.addNestedPass<gpu::GPUModuleOp>(createArithToAMDGPUConversionPass());
+  pm.addPass(createFp8ExtToTablesPass());
+  pm.addNestedPass<gpu::GPUModuleOp>(
+      amdgpu::createAmdgpuEmulateAtomicsPass({options.chip}));
+  pm.addNestedPass<gpu::GPUModuleOp>(createLowerGpuOpsToROCDLOpsPass(
       options.chip, options.indexBitwidth, /*useBarePtrCallConv=*/true));
-  pm.addPass(createGpuSerializeToHsacoPass(options.triple, options.chip,
-                                           options.features, options.optLevel));
+  pm.addNestedPass<gpu::GPUModuleOp>(createGpuSerializeToHsacoPass(
+      options.triple, options.chip, options.features, options.optLevel));
 }
 
 //===----------------------------------------------------------------------===//

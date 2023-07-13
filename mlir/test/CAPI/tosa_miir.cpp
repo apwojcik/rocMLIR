@@ -215,21 +215,17 @@ static bool constructAndTraverseIr(MlirContext ctx) {
 
   auto module = unwrap(moduleOp1);
 
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetInfos();
+  llvm::InitializeAllTargetMCs();
   llvm::InitializeAllAsmParsers();
   llvm::InitializeAllAsmPrinters();
-
-  // Initialize LLVM AMDGPU backend.
-  LLVMInitializeAMDGPUTarget();
-  LLVMInitializeAMDGPUTargetInfo();
-  LLVMInitializeAMDGPUTargetMC();
-  LLVMInitializeAMDGPUAsmPrinter();
 
   const char *triple = "amdgcn-amd-amdhsa";
   const char *chip = "gfx908";
   const char *features = "";
 
-  mlir::PassManager pm(module.getContext(),
-                       mlir::PassManager::Nesting::Implicit);
+  mlir::PassManager pm(module->getName(), mlir::PassManager::Nesting::Implicit);
 
   mlir::rock::buildBufferizePipeline(pm);
 

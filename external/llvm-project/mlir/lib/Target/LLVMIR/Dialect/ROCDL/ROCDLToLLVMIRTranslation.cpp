@@ -109,7 +109,7 @@ public:
       auto func = dyn_cast<LLVM::LLVMFuncOp>(op);
       if (!func)
         return failure();
-      auto value = attribute.getValue().dyn_cast<IntegerAttr>();
+      auto value = dyn_cast<IntegerAttr>(attribute.getValue());
       if (!value)
         return failure();
 
@@ -125,7 +125,7 @@ public:
       auto func = dyn_cast<LLVM::LLVMFuncOp>(op);
       if (!func)
         return failure();
-      auto value = attribute.getValue().dyn_cast<StringAttr>();
+      auto value = dyn_cast<StringAttr>(attribute.getValue());
       if (!value)
         return failure();
 
@@ -135,6 +135,21 @@ public:
       llvmAttrValue.append(value.getValue());
       llvmFunc->addFnAttr("amdgpu-flat-work-group-size", llvmAttrValue);
     }
+    if (ROCDL::ROCDLDialect::getMinWavesPerEu() == attribute.getName()) {
+      auto func = dyn_cast<LLVM::LLVMFuncOp>(op);
+      if (!func)
+        return failure();
+      auto value = attribute.getValue().dyn_cast<IntegerAttr>();
+      if (!value)
+        return failure();
+
+      llvm::Function *llvmFunc =
+          moduleTranslation.lookupFunction(func.getName());
+      llvm::SmallString<8> llvmAttrValue;
+      llvm::raw_svector_ostream attrValueStream(llvmAttrValue);
+      attrValueStream << value.getInt();
+      llvmFunc->addFnAttr("amdgpu-waves-per-eu", llvmAttrValue);
+    }
 
     // Set reqd_work_group_size metadata
     if (ROCDL::ROCDLDialect::getReqdWorkGroupSizeAttrName() ==
@@ -142,7 +157,7 @@ public:
       auto func = dyn_cast<LLVM::LLVMFuncOp>(op);
       if (!func)
         return failure();
-      auto value = attribute.getValue().dyn_cast<DenseI32ArrayAttr>();
+      auto value = dyn_cast<DenseI32ArrayAttr>(attribute.getValue());
       if (!value)
         return failure();
       llvm::LLVMContext &llvmContext = moduleTranslation.getLLVMContext();

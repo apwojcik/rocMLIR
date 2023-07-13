@@ -26,18 +26,20 @@ endif()
 cmake_policy(SET CMP0057 NEW)
 
 # Rock dialect.
-set(ROCMLIR_DRIVER_ENABLED 1 CACHE BOOL "Enable build Rock driver")
 set(ROCMLIR_DRIVER_E2E_TEST_ENABLED 0 CACHE BOOL "Enable build E2E tests for Rock driver")
 set(ROCMLIR_DRIVER_RANDOM_DATA_SEED "none" CACHE STRING "Enable E2E tests using random data")
 set(ROCMLIR_GEN_FLAGS "" CACHE BOOL "Set feature flag for rocmlir-gen")
 set(ROCMLIR_DRIVER_TEST_GPU_VALIDATION 1 CACHE BOOL "Enable E2E tests with GPU validation")
 set(ROCK_E2E_TEST_ENABLED 0 CACHE BOOL "Enable build rock E2E tests")
+set(ROCMLIR_ENABLE_BENCHMARKS "" CACHE STRING "List of enabled benchmarks")
 
 set(ROCMLIR_BIN_DIR "${CMAKE_CURRENT_BINARY_DIR}/bin" CACHE PATH "")
 set(ROCMLIR_LIB_DIR "${CMAKE_CURRENT_BINARY_DIR}/lib" CACHE PATH "")
 message(STATUS "ROCMLIR_BIN_DIR: ${ROCMLIR_BIN_DIR}")
 
-set(BUILD_PERFORMANCE_TESTING ON CACHE BOOL "Build performance tests for components dependent on rocMLIR")
+if( ROCMLIR_ENABLE_BENCHMARKS STREQUAL "all" )
+  set(ROCMLIR_ENABLE_BENCHMARKS CACHE STRING "ck;rocblas" FORCE)
+endif()
 
 # BUILD_MIXR_TARGET is deprecated but still available
 if(BUILD_MIXR_TARGET)
@@ -71,14 +73,12 @@ endif()
 
 # Set up the build for the LLVM/MLIR git-submodule
 include(cmake/llvm-project.cmake)
-
-if(MSVC)
-    add_definitions(-D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING)
-endif()
+include(cmake/mlir-hal.cmake)
 
 if(NOT WIN32)
     # Update the build-tree RPATH
     set(CMAKE_BUILD_RPATH "${ROCMLIR_LIB_DIR};${LLVM_EXTERNAL_LIB_DIR}")
+    message(STATUS "CMAKE_BUILD_RPATH: ${CMAKE_BUILD_RPATH}")
 endif()
 
 # Set up the build for the rocMLIR dialects

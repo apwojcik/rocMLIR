@@ -45,6 +45,16 @@ void createGemmTuningRangeBF(struct TunableParams *newSpace,
                                                  {1, 4, 8, 16},
                                                  {0, 1}};
 
+  // M/block N/block K/block M/wave N/wave kPack aCopyMore/forceUnroll
+  const std::vector<std::vector<uint32_t>> ValidRangeWmmaGemmParams = {
+      {4, 8, 16, 32, 64, 128, 256},
+      {16, 32, 64, 128, 256},
+      {16, 32},
+      {4, 8, 16, 32, 64, 128},
+      {4, 8, 16, 32, 64, 128},
+      {16},
+      {0, 1}};
+
   OpBuilder b(gemmOp.getContext());
   GemmFeatures currentFeatures = gemmOp.getGemmFeatures();
   if (bitEnumContainsAll(currentFeatures, GemmFeatures::mfma)) {
@@ -75,6 +85,29 @@ void createGemmTuningRangeBF(struct TunableParams *newSpace,
         }
       }
     }
+  } else if (bitEnumContainsAll(currentFeatures, GemmFeatures::wmma)) {
+    // Wmma
+    const std::vector<std::vector<uint32_t>> &wmmaParams =
+        ValidRangeWmmaGemmParams;
+    for (uint32_t gemmMPerBlock : wmmaParams[0]) {
+      for (uint32_t gemmNPerBlock : wmmaParams[1]) {
+        for (uint32_t gemmKPerBlock : wmmaParams[2]) {
+          for (uint32_t gemmMPerWave : wmmaParams[3]) {
+            for (uint32_t gemmNPerWave : wmmaParams[4]) {
+              for (uint32_t gemmKPack : wmmaParams[5]) {
+                for (uint32_t forceUnroll : wmmaParams[6]) {
+                  WmmaGemmParamsAttr gemmParams = b.getAttr<WmmaGemmParamsAttr>(
+                      gemmKPerBlock, gemmMPerBlock, gemmNPerBlock, gemmKPack,
+                      gemmMPerWave, gemmNPerWave, forceUnroll);
+                  newSpace->tuningRange.push_back(
+                      gemmParams.cast<RockTuningParamAttrInterface>());
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   } else {
     // Non-XDLOPS
     for (uint32_t blockSize : ValidRangeGeneralGemmParams[0]) {
@@ -83,7 +116,6 @@ void createGemmTuningRangeBF(struct TunableParams *newSpace,
           for (uint32_t gemmKPerBlock : ValidRangeGeneralGemmParams[3]) {
             for (uint32_t gemmMPerThread : ValidRangeGeneralGemmParams[4]) {
               for (uint32_t gemmNPerThread : ValidRangeGeneralGemmParams[5]) {
-
                 GeneralGemmParamsAttr gemmParams =
                     b.getAttr<GeneralGemmParamsAttr>(
                         blockSize, gemmKPerBlock, gemmMPerBlock, gemmNPerBlock,
@@ -306,6 +338,42 @@ std::string getTuningProblemStr(ModuleOp &mod) {
   } else if (opType == KernelType::Gemm) { // gemm case
     rock::GemmOp rGemmOp = dyn_cast<rock::GemmOp>(gemmOp);
     // Please keep these in sync with mlir/utils/performance/perfRunner.py
+    // Data type
+    problemOS << "-t ";
+    Type elemTypeA = gemmIF.getAType(), elemTypeB = gemmIF.getBType();
+    if (elemTypeA.isF32() && elemTypeB.isF32()) {
+      problemOS << "f32";
+    } else if (elemTypeA.isF16() && elemTypeB.isF16()) {
+      problemOS << "f16";
+    } else if (elemTypeA.isBF16() && elemTypeB.isBF16()) {
+      problemOS << "bf16";
+    } else if (elemTypeA.isInteger(8) && elemTypeB.isInteger(8)) {
+      problemOS << "i8";
+    } else if (elemTypeA.isFloat8E4M3FNUZ() && elemTypeB.isFloat8E4M3FNUZ()) {
+      problemOS << "fp8_fp8";
+    } else if (elemTypeA.isFloat8E4M3FNUZ() && elemTypeB.isFloat8E5M2FNUZ()) {
+      problemOS << "fp8_bf8";
+    } else if (elemTypeA.isFloat8E5M2FNUZ() && elemTypeB.isFloat8E4M3FNUZ()) {
+      problemOS << "bf8_fp8";
+    } else if (elemTypeA.isFloat8E5M2FNUZ() && elemTypeB.isFloat8E5M2FNUZ()) {
+      problemOS << "bf8_bf8";
+    } else {
+      // Unknown data type
+      return std::string();
+    }
+
+    // OUtput datatype
+    auto outType = gemmIF.getOutArgument()->get().getType();
+    auto elemTypeC = outType.dyn_cast<mlir::MemRefType>().getElementType();
+    problemOS << " -out_datatype ";
+    if (elemTypeC.isFloat8E4M3FNUZ()) {
+      problemOS << "fp8" << sep;
+    } else if (elemTypeC.isFloat8E5M2FNUZ()) {
+      problemOS << "bf8" << sep;
+    } else {
+      problemOS << elemTypeC << sep;
+    }
+
     // TransA
     problemOS << "-transA ";
     if (rGemmOp.getATransposed())
@@ -327,30 +395,6 @@ std::string getTuningProblemStr(ModuleOp &mod) {
     problemOS << "-k " << gemmIF.getGemmSize().k << sep;
   } else {
     // Unknown op type, unreachable.
-    return std::string();
-  }
-
-  // Data type
-  problemOS << "-t ";
-  Type elemTypeA = gemmIF.getAType(), elemTypeB = gemmIF.getBType();
-  if (elemTypeA.isF32() && elemTypeB.isF32()) {
-    problemOS << "f32";
-  } else if (elemTypeA.isF16() && elemTypeB.isF16()) {
-    problemOS << "f16";
-  } else if (elemTypeA.isBF16() && elemTypeB.isBF16()) {
-    problemOS << "bf16";
-  } else if (elemTypeA.isInteger(8) && elemTypeB.isInteger(8)) {
-    problemOS << "i8";
-  } else if (elemTypeA.isFloat8E4M3FNUZ() && elemTypeB.isFloat8E4M3FNUZ()) {
-    problemOS << "fp8_fp8";
-  } else if (elemTypeA.isFloat8E4M3FNUZ() && elemTypeB.isFloat8E5M2FNUZ()) {
-    problemOS << "fp8_bf8";
-  } else if (elemTypeA.isFloat8E5M2FNUZ() && elemTypeB.isFloat8E4M3FNUZ()) {
-    problemOS << "bf8_fp8";
-  } else if (elemTypeA.isFloat8E5M2FNUZ() && elemTypeB.isFloat8E5M2FNUZ()) {
-    problemOS << "bf8_bf8";
-  } else {
-    // Unknown data type
     return std::string();
   }
 

@@ -12,8 +12,9 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Dialect/XModel/Pipelines/Pipelines.h"
+#include "mlir/Dialect/MHAL/Pipelines/Pipelines.h"
 
+#include "mlir/Dialect/LLVMIR/Transforms/Passes.h"
 #include "mlir/ExecutionEngine/CpuSystemDetect.h"
 #include "mlir/ExecutionEngine/JitRunner.h"
 #include "mlir/ExecutionEngine/OptUtils.h"
@@ -22,6 +23,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/InitRocMLIRDialects.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -81,13 +83,14 @@ static LogicalResult runMLIRPasses(Operation *m, JitRunnerOptions &options) {
 
   // Host Compiler/Scheduler Pipeline
   PassManager pm(m->getContext());
-  applyPassManagerCLOptions(pm);
-
-  xmodel::RunnerOptions opts;
+  if (failed(applyPassManagerCLOptions(pm)))
+    return failure();
+  mhal::RunnerOptions opts;
   opts.targetTypes = targetTypes;
   opts.targetArchs = targetArchs;
 
-  xmodel::buildRunnerPipeline(pm, opts);
+  mhal::buildRunnerPipeline(pm, opts);
+  pm.addPass(LLVM::createSoftwareBF16Pass());
 
   return pm.run(m);
 }
@@ -108,6 +111,7 @@ int main(int argc, char **argv) {
   DialectRegistry registry;
   mlir::registerRocMLIRDialects(registry);
   mlir::registerLLVMDialectTranslation(registry);
+  mlir::registerBuiltinDialectTranslation(registry);
 
   mlir::JitRunnerConfig jitRunnerConfig;
   jitRunnerConfig.mlirTransformer = runMLIRPasses;

@@ -5,7 +5,7 @@
 // RUN:             --convert-scf-to-cf --convert-cf-to-llvm --convert-vector-to-llvm \
 // RUN:             --convert-func-to-llvm --convert-arith-to-llvm | \
 // RUN:   mlir-cpu-runner -e entry -entry-point-result=void \
-// RUN:      --shared-libs="%linalg_test_lib_dir/%prefix_mlir_c_runner_utils%shlibext,%linalg_test_lib_dir/%prefix_mlir_runner_utils%shlibext" | \
+// RUN:      --shared-libs="%mlir_c_runner_utils,%mlir_runner_utils" | \
 // RUN:   FileCheck %s
 
 // CHECK-NOT: Mismatch

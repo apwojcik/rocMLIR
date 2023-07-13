@@ -34,7 +34,7 @@ namespace {
 
 static bool isZeroAttribute(Attribute value) {
   if (auto intValue = value.dyn_cast<IntegerAttr>())
-    return intValue.getValue().isNullValue();
+    return intValue.getValue().isZero();
   if (auto fpValue = value.dyn_cast<FloatAttr>())
     return fpValue.getValue().isZero();
   if (auto splatValue = value.dyn_cast<SplatElementsAttr>())
@@ -79,7 +79,7 @@ static Value expandTensor(ConversionPatternRewriter &rw, Operation *op,
 }
 
 static std::tuple<StringAttr, std::optional<uint32_t>, rock::GemmFeatures>
-getArchAttributes(Operation *op) {
+getArchAttributes(Operation *op, Type inputType) {
   auto func = op->getParentOfType<func::FuncOp>();
   auto mod = func->getParentOfType<ModuleOp>();
 
@@ -90,11 +90,11 @@ getArchAttributes(Operation *op) {
 
   if (auto attr = op->getAttrOfType<StringAttr>("arch"))
     arch = attr;
-  else if (auto attr = func->getAttrOfType<StringAttr>("xmodel.arch"))
+  else if (auto attr = func->getAttrOfType<StringAttr>("mhal.arch"))
     arch = attr;
   else if (auto attr = func->getAttrOfType<StringAttr>("arch"))
     arch = attr;
-  else if (auto attr = mod->getAttrOfType<StringAttr>("xmodel.arch"))
+  else if (auto attr = mod->getAttrOfType<StringAttr>("mhal.arch"))
     arch = attr;
 
   if (auto attr = op->getAttrOfType<IntegerAttr>("num_cu"))
@@ -108,7 +108,7 @@ getArchAttributes(Operation *op) {
     xdlopsV2 = attr.getValue();
 
   rock::AmdArchInfo archInfo = rock::lookupArchInfo(arch);
-  rock::GemmFeatures features = archInfo.defaultFeatures;
+  rock::GemmFeatures features = archInfo.getDefaultFeatures(inputType);
   if (xdlopsV2.has_value())
     features = rock::bitEnumSet(features, rock::GemmFeatures::mfma, *xdlopsV2);
 
@@ -131,7 +131,7 @@ makeRockConv2D(ConversionPatternRewriter &rw, Operation *op, Value input,
   StringAttr arch;
   std::optional<uint32_t> num_cu;
   rock::GemmFeatures features;
-  std::tie(arch, num_cu, features) = getArchAttributes(op);
+  std::tie(arch, num_cu, features) = getArchAttributes(op, input.getType());
 
   ArrayRef<int64_t> pad64 = pad;
   ArrayRef<int64_t> stride64 = stride;
@@ -321,7 +321,8 @@ public:
     StringAttr arch;
     std::optional<uint32_t> num_cu;
     rock::GemmFeatures features;
-    std::tie(arch, num_cu, features) = getArchAttributes(op);
+    std::tie(arch, num_cu, features) =
+        getArchAttributes(op, op.getA().getType());
 
     auto [mDim, nDim] = getLastDims(transposeC, outputType);
 
@@ -554,6 +555,99 @@ struct TransposeRewritePattern : public OpRewritePattern<tosa::TransposeOp> {
   }
 };
 
+struct AttentionRewritePattern : public OpRewritePattern<tosa::MatMulOp> {
+  using OpRewritePattern<tosa::MatMulOp>::OpRewritePattern;
+
+  FailureOr<Value> maybeSoftmaxNumerator(Value val) const {
+    tosa::ExpOp exp = val.getDefiningOp<tosa::ExpOp>();
+    if (!exp) {
+      return failure();
+    }
+    tosa::SubOp sub = exp.getInput1().getDefiningOp<tosa::SubOp>();
+    if (!sub) {
+      return failure();
+    }
+    tosa::ReduceMaxOp rmax = sub.getInput2().getDefiningOp<tosa::ReduceMaxOp>();
+    if (!rmax) {
+      return failure();
+    }
+    if (rmax.getInput() != sub.getInput1()) {
+      return failure();
+    }
+    return rmax.getInput();
+  }
+
+  FailureOr<Value> maybeSoftmaxDenominator(Value val) const {
+    tosa::ReduceSumOp rsum = val.getDefiningOp<tosa::ReduceSumOp>();
+    if (!rsum) {
+      return failure();
+    }
+    return maybeSoftmaxNumerator(rsum.getInput());
+  }
+
+  FailureOr<Value> maybeSoftmax(Value val) const {
+    tosa::MulOp mul = val.getDefiningOp<tosa::MulOp>();
+    if (!mul) {
+      return failure();
+    }
+    if (tosa::ReciprocalOp rec =
+            mul.getInput1().getDefiningOp<tosa::ReciprocalOp>()) {
+      return maybeSoftmaxDenominator(rec.getInput1());
+    } else if (tosa::ReciprocalOp rec =
+                   mul.getInput2().getDefiningOp<tosa::ReciprocalOp>()) {
+      return maybeSoftmaxDenominator(rec.getInput1());
+    } else {
+      return failure();
+    }
+  }
+
+  FailureOr<std::tuple<tosa::MatMulOp, TypedValue<TensorType>>>
+  getMatMulAndScaleInputs(tosa::MulOp scale) const {
+    if (tosa::MatMulOp mm = scale.getInput1().getDefiningOp<tosa::MatMulOp>()) {
+      return std::make_tuple(mm, scale.getInput2());
+    }
+    if (tosa::MatMulOp mm = scale.getInput2().getDefiningOp<tosa::MatMulOp>()) {
+      return std::make_tuple(mm, scale.getInput1());
+    }
+    return failure();
+  }
+
+  LogicalResult match(tosa::MatMulOp op) const override {
+    FailureOr<Value> softmaxInput = maybeSoftmax(op.getA());
+    if (failed(softmaxInput)) {
+      return failure();
+    }
+    if (tosa::MulOp scale = softmaxInput.value().getDefiningOp<tosa::MulOp>()) {
+      FailureOr<std::tuple<tosa::MatMulOp, TypedValue<TensorType>>>
+          scaledMatMul = getMatMulAndScaleInputs(scale);
+      if (succeeded(scaledMatMul)) {
+        return success();
+      }
+    }
+    return failure();
+  }
+
+  void rewrite(tosa::MatMulOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value softmaxInput = maybeSoftmax(op.getA()).value();
+    tosa::MulOp scale = softmaxInput.getDefiningOp<tosa::MulOp>();
+    auto [firstMatMulOp, scaleInput] = getMatMulAndScaleInputs(scale).value();
+    auto outputType = op.getType().template cast<RankedTensorType>();
+    Value output = rewriter.create<bufferization::AllocTensorOp>(
+        loc, outputType, ValueRange{});
+    StringAttr arch;
+    std::optional<uint32_t> num_cu;
+    rock::GemmFeatures features;
+    std::tie(arch, num_cu, features) = getArchAttributes(op, op.getType());
+    rock::AttentionOp attnOp = rewriter.create<rock::AttentionOp>(
+        loc, outputType, firstMatMulOp.getA(), firstMatMulOp.getB(), op.getB(),
+        scaleInput, output, rewriter.getAttr<rock::GemmFeaturesAttr>(features),
+        /*blockSize=*/nullptr,
+        /*gridSize=*/nullptr);
+    rewriter.replaceOp(op, attnOp.getResult());
+  }
+};
+
 template <typename TosaReduceOp>
 typename std::enable_if_t<
     std::is_same<TosaReduceOp, tosa::ReduceSumOp>::value ||
@@ -568,9 +662,9 @@ typename std::enable_if_t<
   Value output =
       rw.create<bufferization::AllocTensorOp>(loc, outputType, ValueRange{});
   StringAttr arch;
-  Optional<uint32_t> num_cu;
+  std::optional<uint32_t> num_cu;
   rock::GemmFeatures features;
-  std::tie(arch, num_cu, features) = getArchAttributes(op);
+  std::tie(arch, num_cu, features) = getArchAttributes(op, op.getType());
 
   int32_t blockSize = 256;
   auto elementCount =
@@ -619,9 +713,10 @@ public:
                                 tosa::ReduceSumOp::Adaptor adaptor,
                                 ConversionPatternRewriter &rw) const final {
     StringAttr arch;
-    Optional<uint32_t> num_cu;
+    std::optional<uint32_t> num_cu;
     rock::GemmFeatures features;
-    std::tie(arch, num_cu, features) = getArchAttributes(op);
+    std::tie(arch, num_cu, features) =
+        getArchAttributes(op, op.getInput().getType());
     if (!rock::bitEnumContainsAll(features, rock::GemmFeatures::atomic_add)) {
       op.emitError("Currently, we only support ReduceSum operators on GPUs "
                    "with atomic add support.!.");
@@ -668,5 +763,5 @@ void tosa::populateTosaToRockConversionPatterns(MLIRContext *context,
 
 void tosa::populateTosaToRockTensorConversionPatterns(
     MLIRContext *context, RewritePatternSet &patterns) {
-  patterns.add<TransposeRewritePattern>(context);
+  patterns.add<AttentionRewritePattern, TransposeRewritePattern>(context);
 }

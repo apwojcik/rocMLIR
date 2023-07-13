@@ -286,8 +286,8 @@ struct ConvertingCopyKernelRewritePattern final
                                 ConvertingCopyKernelOpAdaptor adaptor,
                                 ConversionPatternRewriter &b) const override {
     Location loc = op.getLoc();
-    TypedValue<ShapedType> input = adaptor.getInput();
-    TypedValue<ShapedType> output = adaptor.getOutput();
+    auto input = cast<TypedValue<ShapedType>>(adaptor.getInput());
+    auto output = cast<TypedValue<ShapedType>>(adaptor.getOutput());
     Type inputDataType = input.getType().getElementType();
     Type outputDataType = output.getType().getElementType();
     if (!op.getElemsPerThread().has_value())
@@ -447,16 +447,16 @@ LogicalResult backwardWeightAtomicAdd(Conv2DBwdWeightOp op,
 
   ConvolutionContext ctx = populateConvContext(op);
 
-  GemmFeatures features = op.getFeatures();
-  bool isXdlops = bitEnumContainsAll(features, GemmFeatures::mfma);
-
   // Get shape of filter tensor.
   ShapedType filterType = op.getFilter().getType();
   auto filterShape = filterType.getShape();
 
+  GemmFeatures features = op.getFeatures();
+  bool isAccel = rock::isAccel(features);
+
   // Determine whether to use workspace.
   bool hasWorkspace =
-      (filterType.getElementType() == b.getF16Type() && isXdlops);
+      (filterType.getElementType() == b.getF16Type() && isAccel);
   if (hasWorkspace && !op.getWorkspace()) {
     return op.emitOpError(
         "workspace needed for f16 atomic add but none provided");
@@ -464,9 +464,8 @@ LogicalResult backwardWeightAtomicAdd(Conv2DBwdWeightOp op,
 
   // The 1st kernel will conduct the actual backward weight convolution using
   // atomic adds.
-
-  if (!isXdlops)
-    return op->emitOpError("atomic add kernel requires xdlops");
+  if (!isAccel)
+    return op->emitOpError("atomic add kernel requires gemm acceleration");
 
   // Get shape of input tensor.
   ShapedType inputType = op.getInput().getType();
@@ -922,7 +921,7 @@ template <typename T> struct Conv2DRewritePattern : public OpRewritePattern<T> {
       return failure();
     }
 
-    Attribute tuningParams = op.getParamsAttr();
+    auto tuningParams = op.getParamsAttr();
     GemmSize gemmSize = op.getGemmSize();
     std::optional<GemmSize> maybeGemmExtraPad;
 
@@ -935,8 +934,6 @@ template <typename T> struct Conv2DRewritePattern : public OpRewritePattern<T> {
       maybeGemmExtraPad = GemmSize{-1, -1, -1, -1};
     }
 
-    // TODO: don't restrict this to xdlops only once we've validated on a gfx11
-    // machine
     if (ConvOpType::BwdWeight == convOpType &&
         isWrWAtomicKernel(features, dataType, maybeGemmExtraPad.has_value())) {
       return backwardWeightAtomicAdd(cast<Conv2DBwdWeightOp>(op), b);

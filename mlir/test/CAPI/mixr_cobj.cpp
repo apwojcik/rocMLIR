@@ -187,10 +187,9 @@ static bool constructAndTraverseIr(MlirContext ctx) {
 
   MlirOperation moduleMO = mlirModuleGetOperation(moduleOp1);
 
-  mlir::PassManager pm0(module.getContext(),
+  mlir::PassManager pm0(module->getName(),
                         mlir::PassManager::Nesting::Implicit);
-  mlir::PassManager pm(module.getContext(),
-                       mlir::PassManager::Nesting::Implicit);
+  mlir::PassManager pm(module->getName(), mlir::PassManager::Nesting::Implicit);
 
   mlir::migraphx::addHighLevelPipeline(pm0);
   (void)pm0.run(module);
@@ -206,10 +205,10 @@ static bool constructAndTraverseIr(MlirContext ctx) {
     for (auto arg : args) {
       argIdx += 3; // 3 per memref : allocated ptr, aligned ptr, offset
       auto sType = arg.getType().template cast<mlir::ShapedType>();
-      int64_t rank = sType.getRank();
-      printf("rank:%ld, dim:", rank);
+      long long rank = sType.getRank();
+      printf("rank:%lld, dim:", rank);
       for (int64_t i = 0; i < rank; ++i)
-        printf("<%ld>", sType.getDimSize(i));
+        printf("<%lld>", static_cast<long long>(sType.getDimSize(i)));
       printf("\n");
       argIdx += rank * 2; // 2 per each dimension : size, stride
     }

@@ -15,9 +15,11 @@ set(LIBS
   ${rocmlir_dialect_libs}
   ${rocmlir_conversion_libs}
   MLIRLspServerLib
+  MLIRMHAL
+  MLIRMHALTransforms
   )
 
-add_llvm_tool(rocmlir-lsp-server
+add_rocmlir_tool(rocmlir-lsp-server
   rocmlir-lsp-server.cpp
 
   DEPENDS

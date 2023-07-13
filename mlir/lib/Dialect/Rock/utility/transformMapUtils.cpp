@@ -1149,14 +1149,17 @@ TransformMapAttr mlir::rock::transformCollapseShape(
     else if (inpDims.empty())
       transform.ignore(transform.startName(outDim));
     else {
-      SmallVector<SmallString<8>> mergeNamesStore;
+      // Create the name store in advance
+      llvm::SmallDenseMap<int64_t, SmallString<8>> mergeNamesStore;
+      for (int64_t inpDim : inpDims) {
+        SmallString<8> inpDimName(Twine("col" + Twine(inpDim)).str());
+        mergeNamesStore[inpDim] = inpDimName;
+      }
       SmallVector<uint32_t> mergeDims;
       SmallVector<StringRef> mergeNames;
       SmallVector<int64_t> mergeSizes;
       for (int64_t inpDim : inpDims) {
-        mergeNamesStore.emplace_back();
-        mergeNames.push_back(
-            (Twine("col") + Twine(inpDim)).toStringRef(mergeNamesStore.back()));
+        mergeNames.push_back(mergeNamesStore[inpDim]);
         mergeDims.push_back(inpDim);
         mergeSizes.push_back(inpShape[inpDim]);
       }
@@ -1215,14 +1218,19 @@ TransformMapAttr mlir::rock::transformExpandShape(
           << "Empty reassocation list in expand_shape, shouldn't happen\n");
       return TransformMapAttr();
     } else {
-      SmallVector<SmallString<8>> unmergeNamesStore;
-      SmallVector<uint32_t> unmergeDims;
-      SmallVector<StringRef> unmergeNames;
-      SmallVector<int64_t> unmergeSizes;
+
+      // Create the name store in advance
+      llvm::SmallDenseMap<int64_t, SmallString<8>> unmergeNamesStore;
       for (int64_t outDim : outDims) {
-        unmergeNamesStore.emplace_back();
-        unmergeNames.push_back((Twine("exp") + Twine(outDim))
-                                   .toStringRef(unmergeNamesStore.back()));
+        SmallString<8> outDimName(Twine("exp" + Twine(outDim)).str());
+        unmergeNamesStore[outDim] = outDimName;
+      }
+
+      SmallVector<uint32_t> unmergeDims;
+      SmallVector<int64_t> unmergeSizes;
+      SmallVector<StringRef> unmergeNames;
+      for (int64_t outDim : outDims) {
+        unmergeNames.push_back(unmergeNamesStore[outDim]);
         unmergeDims.push_back(outDim);
         unmergeSizes.push_back(outShape[outDim]);
       }
@@ -1269,4 +1277,18 @@ TransformMapAttr mlir::rock::transformExtractSlice(OpBuilder &b, Location loc,
   }
   transform.slice(upperNameRefs, lowerNameRefs, offsets, ends);
   return transform.get();
+}
+
+void mlir::rock::convertDimStridestoSizes(ArrayRef<int64_t> orderedDimStrides,
+                                          int64_t numElements,
+                                          SmallVectorImpl<int64_t> &dimSizes) {
+  for (auto [idx, dimStride] : llvm::enumerate(orderedDimStrides)) {
+    int64_t immLargerCoeff;
+    if (idx != 0) {
+      immLargerCoeff = orderedDimStrides[idx - 1];
+    } else {
+      immLargerCoeff = numElements;
+    }
+    dimSizes.push_back(immLargerCoeff / dimStride);
+  }
 }

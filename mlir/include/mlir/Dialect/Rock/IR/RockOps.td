@@ -202,6 +202,43 @@ def Rock_ReduceOp :
   }];
 }
 
+def Rock_AttentionOp :
+  Rock_Op<"attention", [AllElementTypesMatch<["queries", "keys", "values", "scale"]>]>,
+  Arguments<(ins
+    Arg<TensorOrMemRefOf<[F32, F16]>, "queries", [MemRead]>:$queries,
+    Arg<TensorOrMemRefOf<[F32, F16]>, "keys", [MemRead]>:$keys,
+    Arg<TensorOrMemRefOf<[F32, F16]>, "values", [MemRead]>:$values,
+    Arg<TensorOrMemRefOf<[F32, F16]>, "scale", [MemRead]>:$scale,
+    Arg<TensorOrMemRefOf<[F32, F16]>, "output", [MemRead, MemWrite]>:$out,
+    Rock_GemmFeaturesAttr:$features,
+    OptionalAttr<I32Attr>:$blockSize,
+    OptionalAttr<I32Attr>:$gridSize
+  )>,
+  Results<(outs Optional<TensorOf<[F32, F16]>>:$result)> {
+  let summary = "Attention operation of transformer models";
+  let description = [{
+    Performs the operation out = SOFTMAX((queries * keys) .* scale) * values.
+
+    This operation performs attention mechanism of transformer models.
+
+    Those creating a `rock.attention` must specify the GPU architecture being targetted
+    and the number of compute units (numCu) available. The parameters
+    `gridSize`, and `blockSize` are optional as they can be inferred by
+    a tuning process or a heuristic, but they must be set before the `attention` is
+    lowered into the `gridwise_attention` stage of the code generation pipeline.
+
+    `features` specifies what hardware features can be used in the generated code.
+  }];
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    `(` operands `)` `features` `=` $features attr-dict
+    `:` type(operands) (`->` type($result)^)?
+  }];
+  let extraClassDeclaration = [{
+    ::mlir::OpOperand* getOutArgument() { return &(*this)->getOpOperand(1); }
+  }];
+}
+
 def Rock_ZeroInitKernelOp :
     Rock_Op<"zero_init_kernel", []>,
     Arguments<(ins AnyTensorOrMemRef:$buffer,
@@ -404,6 +441,21 @@ def Rock_FillOp:
   let assemblyFormat = [{
     `(` operands `)` attr-dict `:` type(operands)
   }];
+}
+
+def Rock_BlockwiseFillOp:
+    Rock_Op<"blockwise_fill", [AllElementTypesMatch<["memref", "value"]>]>,
+    Arguments<(ins AnyMemRef:$memref,
+                   AnyTypeOf<[AnyInteger, AnyFloat, AnyVector]>:$value,
+                   I32Attr:$blockSize)> {
+  let summary = "Fill memory with constant value on GPU";
+  let description = [{
+    The `rock.blockwise_fill` op fills a LDS memref on GPU with a constant value.
+  }];
+  let assemblyFormat = [{
+    `(` operands `)` attr-dict `:` type(operands)
+  }];
+  let hasVerifier = 1;
 }
 
 def Rock_WorkgroupBarrierOp:
@@ -664,7 +716,7 @@ def Rock_TransformingForOp :
     }
 
     TypedValue<IntegerType> getValidity(uint32_t domain) {
-      return getValidities()[domain];
+      return cast<TypedValue<IntegerType>>(getValidities()[domain]);
     }
 
     Block::BlockArgListType getIterArgs() {
@@ -912,6 +964,7 @@ def Rock_ThreadwiseReadIntoOp :
       Arg<MemRefRankOf<SupportedMemoryElems, [1]>,
         "destination registers", [MemWrite]>:$dest,
       TransformMapArrayAttr:$extraViews,
+      Variadic<Index>:$extraIndices,
       UnitAttr:$forceUnroll,
       UnitAttr:$useIndexDiffs
     )> {
@@ -947,14 +1000,20 @@ def Rock_ThreadwiseReadIntoOp :
     for MAPS.
 
     The input to extraViews ; (the transforms on %source) must have the form
-    (workgroup_id, workitem_id, iteration_number)
+    (extraIdx0, ... , extraIdxN, iteration_number)
+
+    Primarily, extraIndices would be used to pass in tid and bid. This would need
+    to have a matching view in [extraViews]source. The extraIndices could be used
+    to integrate loop induction vars that is outside of the op.
+    If extraIndices are used, the [extraViews]source must have the form
+    (extraIdx0, ... , extraIdxN, iteration_number).
 
     This is used during fusion to represent loads from addition arguments like
     bias tensors.
   }];
 
   let assemblyFormat = [{
-    attr-dict $extraViews `(` $source `)` `->` $dest
+    attr-dict $extraViews `(` $source `)` (`[` $extraIndices^ `]`)? `->` $dest
     `:` type($source) `->` type($dest)
   }];
   let hasVerifier = 1;
@@ -968,6 +1027,7 @@ def Rock_ThreadwiseWriteAllOp :
       "source registers", [MemRead]>:$source,
       Arg<MemRefOf<SupportedMemoryElems>, "detination view", [MemWrite]>:$dest,
       TransformMapArrayAttr:$extraViews,
+      Variadic<Index>:$extraIndices,
       Rock_GemmFeaturesAttr:$features,
       StoreMethodAttr:$storeMethod,
       UnitAttr:$forceUnroll,
@@ -1003,7 +1063,14 @@ def Rock_ThreadwiseWriteAllOp :
     for MAPS, and the oob dimensions are those combputed on MAPS.
 
     The input to extraViews ; (the transforms on %dest) must have the form
-    (workgroup_id, workitem_id, iteration_number)
+    (extraIdx0, ... , extraIdxN, iteration_number).
+
+    Primarily, extraIndices would be used to pass in tid and bid. This would need
+    to have a matching view in [extraViews]dest. The extraIndices could be used
+    to integrate loop induction vars that is outside of the op.
+
+    If extraIndices are used, the [extraViews]dest must have the form
+    (extraIdx0, ... , extraIdxN, iteration_number).
 
     This is used during fusion to allow rewriting
     ```mlir
@@ -1021,7 +1088,7 @@ def Rock_ThreadwiseWriteAllOp :
   }];
 
   let assemblyFormat = [{
-    `features` `=` $features attr-dict $source  `->` $extraViews `(` $dest `)` `by` $storeMethod
+    `features` `=` $features attr-dict $source  `->` $extraViews `(` $dest `)` (`[` $extraIndices^ `]`)? `by` $storeMethod
     `:` type($source) `->` type($dest)
   }];
   let hasVerifier = 1;
@@ -1142,6 +1209,46 @@ def Rock_AccelGemmOp:
     $matrixC `+` `` `=` $matrixA`[`$mRepeat`]` `*` $matrixB`[`$nRepeat`]` `features` `=` $features attr-dict
     `:` type($matrixC) `+` `` `=` type($matrixA) `*` type($matrixB)
   }];
+  let hasVerifier = 1;
+}
+
+// blockwise_broadcasting_reduction
+def Rock_BlockwiseBroadcastReduceOp:
+    Rock_Op<"blockwise_broadcast_reduce">,
+    Arguments<(ins MemRefOf<GemmOutputTypes>:$input,
+                   MemRefOf<LdsBufferTypes>:$workspace_buffer,
+                   MemRefOf<GemmOutputTypes>:$output,
+                   IndexAttr:$axis,
+                   ReduceMethodAttr:$reduceMethod,
+                   TransformMapArrayAttr:$inputRegView,
+                   I32Attr:$blockSize
+                   )> {
+  let summary = "Blockwise reduce operation with output broadcasting";
+  let description = [{
+    The `rock.blockwise_broadcast_reduce` op does reduce at a blockwise level and
+    to fill all elements of the input tensor with reduced values. Note that both input/output
+    tensors live in registers.
+
+    $input tensor resides in registers, where each thread holds a subset of the elements 
+    of the tensor as defined by $inputView.
+
+    $inputRegView should be a coordinate transform taking {tid, iter} (where iter is 
+    the register number in $input and tid is the ID of the lane within the workgroup 
+    and producing indices into a virtual tensor `{d0, ..., dR, ... dN} 
+    which is spread across the lanes of the workgroup. Note that the reduction
+    axis (Dr) is not sliced because it is not supported.
+
+    $output tensor resides in registers. It would be of same shape as the input
+    tensor because the reduced value will be broadcasted to create the same shape as
+    the input tensor.
+
+    $workspace_buffer resides in LDS. This should be a flat tensor with at least
+    number of elements in the input tensor. 
+  }];
+  let assemblyFormat = [{
+    $reduceMethod $inputRegView $input `into` $output `using` $workspace_buffer attr-dict `:` type($input) `using` type($workspace_buffer) `into` type($output)
+  }];
+
   let hasVerifier = 1;
 }
 

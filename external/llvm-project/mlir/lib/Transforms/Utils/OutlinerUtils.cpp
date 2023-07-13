@@ -40,11 +40,13 @@ using namespace mlir;
 
 static bool isZeroAttribute(Attribute value) {
   if (auto intValue = value.dyn_cast<IntegerAttr>())
-    return intValue.getValue().isNullValue();
+    return intValue.getValue().isZero();
   if (auto fpValue = value.dyn_cast<FloatAttr>())
     return fpValue.getValue().isZero();
   if (auto splatValue = value.dyn_cast<SplatElementsAttr>())
     return isZeroAttribute(splatValue.getSplatValue<Attribute>());
+  if (auto elementsValue = value.dyn_cast<DenseResourceElementsAttr>())
+    return false;
   if (auto elementsValue = value.dyn_cast<ElementsAttr>())
     return llvm::all_of(elementsValue.getValues<Attribute>(), isZeroAttribute);
   if (auto arrayValue = value.dyn_cast<ArrayAttr>())
@@ -150,8 +152,7 @@ static bool opsMatch(Operation *lhs, Operation *rhs, OutliningCandidate &one,
                      OutliningCandidate &two) {
   // Check that the operations are equivalent.
   if (!OperationEquivalence::isEquivalentTo(
-          lhs, rhs, OperationEquivalence::ignoreValueEquivalence,
-          OperationEquivalence::ignoreValueEquivalence,
+          lhs, rhs, OperationEquivalence::ignoreValueEquivalence, nullptr,
           OperationEquivalence::Flags::IgnoreLocations))
     return false;
 

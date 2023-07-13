@@ -158,9 +158,9 @@ static FailureOr<double> benchmarkKernel(const char *binary,
 }
 
 static FailureOr<rock::RockGemmWrapperInterface> extractKernel(ModuleOp op) {
-  if (!op->hasAttr("xmodel.arch")) {
+  if (!op->hasAttr("mhal.arch")) {
     return op->emitOpError(
-        "no architecture set, set xmodel.arch on the input module");
+        "no architecture set, set mhal.arch on the input module");
   }
   rock::RockGemmWrapperInterface kernel;
   uint32_t nKernels = 0;
@@ -201,13 +201,15 @@ static LogicalResult runTuningLoop(ModuleOp source) {
     if (!shapedTy.hasStaticShape())
       return kernelFunc.emitOpError(
           "all kernel arguments must have static shape");
-    bufferLengths.push_back(shapedTy.getSizeInBits() / 8);
+    int64_t sizeInBits =
+        shapedTy.getNumElements() * shapedTy.getElementTypeBitWidth();
+    bufferLengths.push_back(sizeInBits / 8);
   }
 
   // 2. Set up pipelines. Do this only once to save on construction cost.
   MLIRContext *ctx = source->getContext();
-  PassManager applicability(ctx, PassManager::Nesting::Implicit);
-  PassManager compilation(ctx, PassManager::Nesting::Implicit);
+  PassManager applicability(source->getName(), PassManager::Nesting::Implicit);
+  PassManager compilation(source->getName(), PassManager::Nesting::Implicit);
 
   rock::KernelOptions applicabilityOpts;
   applicabilityOpts.enableApplicability = true;
@@ -223,7 +225,7 @@ static LogicalResult runTuningLoop(ModuleOp source) {
 
   RocmDeviceName deviceName;
   StringRef archName =
-      source->getAttrOfType<StringAttr>("xmodel.arch").getValue();
+      source->getAttrOfType<StringAttr>("mhal.arch").getValue();
   if (failed(deviceName.parse(archName)))
     return source->emitOpError("could not parse arch name: " + archName);
   rock::BackendOptions backendOpts;
@@ -288,13 +290,19 @@ static LogicalResult runTuningLoop(ModuleOp source) {
       return failure();
     }
 
-    // Extract binary anb benchmark
+    // Extract binary and benchmark
     std::string hipModule;
-    tuneCopy.walk([&hipModule](gpu::GPUModuleOp op) {
-      hipModule = op->getAttrOfType<StringAttr>("gpu.binary").getValue().str();
-      return WalkResult::interrupt();
+    tuneCopy.walk([&hipModule, &kernelFuncName](gpu::GPUModuleOp op) {
+      std::string moduleName = op.getName().str();
+      if (moduleName == kernelFuncName + "_module") {
+        hipModule =
+            op->getAttrOfType<StringAttr>("gpu.binary").getValue().str();
+        return WalkResult::interrupt();
+      }
+      llvm::errs() << "Ignoring utility kernels, benchmark times will not "
+                      "match performance tests\n";
+      return WalkResult::advance();
     });
-
     FailureOr<double> timing = benchmarkKernel(
         hipModule.c_str(), kernelFuncName.c_str(), blockSize, gridSize,
         dataType, hostBuffers, gpuBuffers, bufferLengths);
@@ -337,7 +345,7 @@ int main(int argc, char **argv) {
 
   ModuleOp module;
   WalkResult findModule = source->walk([&](ModuleOp op) -> WalkResult {
-    if (op->hasAttr("xmodel.arch")) {
+    if (op->hasAttr("mhal.arch")) {
       module = op;
       return WalkResult::interrupt();
     }
@@ -345,7 +353,7 @@ int main(int argc, char **argv) {
   });
   if (!findModule.wasInterrupted()) {
     source->emitOpError(
-        "no architecture set, set xmodel.arch on the input module");
+        "no architecture set, set mhal.arch on the input module");
     llvm::errs() << "Tuning loop failed\n";
     return EXIT_FAILURE;
   }

@@ -500,8 +500,15 @@ GemmSize GemmSize::fromConvolution(ConvOpType type,
   return GemmSize(gemmGSize, gemmMSize, gemmKSize, gemmNSize);
 }
 
-static LogicalResult verifyGemmTypes(Operation *op, Type elemTypeA,
-                                     Type elemTypeB, Type elemTypeC) {
+static LogicalResult verifyGemmTypes(Operation *op, GemmFeatures features,
+                                     Type elemTypeA, Type elemTypeB,
+                                     Type elemTypeC) {
+  if (bitEnumContainsAll(features, GemmFeatures::wmma)) {
+    if (!(elemTypeA.isF16() || elemTypeA.isBF16() || elemTypeA.isInteger(8))) {
+      return op->emitOpError(
+          "Wmma gridwise supports only F16/BF16/int8 data types");
+    }
+  }
   if (elemTypeA != elemTypeB &&
       !(elemTypeA.isFloat8E5M2FNUZ() && elemTypeB.isFloat8E4M3FNUZ()) &&
       !(elemTypeA.isFloat8E4M3FNUZ() && elemTypeB.isFloat8E5M2FNUZ()))
@@ -531,7 +538,8 @@ static LogicalResult verifyGemmTypes(RockGemmWrapperInterface gemmOp) {
                        .cast<ShapedType>()
                        .getElementType();
 
-  return verifyGemmTypes(gemmOp, elemTypeA, elemTypeB, elemTypeC);
+  return verifyGemmTypes(gemmOp, gemmOp.getGemmFeatures(), elemTypeA, elemTypeB,
+                         elemTypeC);
 }
 
 static LogicalResult verifyConvOp(RockConvInterface convOp) {
@@ -553,11 +561,14 @@ static LogicalResult verifyConvOp(RockConvInterface convOp) {
       isDisjointed("input_layout", "hi", "wi"))
     return op->emitError("Disjointed yx or hw!");
 
-  bool isXdlops = bitEnumContainsAll(convOp.getFeatures(), GemmFeatures::mfma);
   RockGemmWrapperInterface gemmOp = cast<RockGemmWrapperInterface>(*convOp);
+
   if (failed(verifyGemmTypes(gemmOp)))
     return failure();
-  if (gemmOp.getDerivedBlockSize().has_value() && !isXdlops) {
+
+  bool isAccel = bitEnumContainsAny(convOp.getFeatures(),
+                                    GemmFeatures::mfma | GemmFeatures::wmma);
+  if (gemmOp.getDerivedBlockSize().has_value() && !isAccel) {
     return op->emitOpError(
         "general kernels shouldn't have derived block size.");
   }
@@ -690,10 +701,13 @@ static LogicalResult checkGemmSize(Value matrix, Operation *op,
   while (auto transform = raw.getDefiningOp<rock::TransformOp>())
     raw = transform.getInput();
   ShapedType type = raw.getType().cast<ShapedType>();
-  if (!type.hasStaticShape() || type.getSizeInBits() >= fourGbits) {
+  if (!type.hasStaticShape())
+    return op->emitOpError() << "only static shapes are supported";
+
+  int64_t sizeInBits = type.getNumElements() * type.getElementTypeBitWidth();
+  if (sizeInBits >= fourGbits)
     return op->emitOpError() << "underlying storage for matrix " << name
                              << " cannot potentially be 4 GB or more";
-  }
   return success();
 }
 
@@ -799,7 +813,8 @@ template <typename GridOp> static LogicalResult verifyGridwiseGemm(GridOp op) {
              cType = op.getC().getType();
   Type aElem = aType.getElementType(), bElem = bType.getElementType(),
        cElem = cType.getElementType();
-  if (failed(verifyGemmTypes(op, aElem, bElem, cElem)))
+
+  if (failed(verifyGemmTypes(op, op.getFeatures(), aElem, bElem, cElem)))
     return failure();
   if (aElem.isInteger(8) && !(cElem.isInteger(32) || cElem.isInteger(8)))
     return op.emitOpError("i8 input requires i32 or i8 output");
@@ -1439,7 +1454,7 @@ LogicalResult ThreadwiseReadIntoOp::verify() {
   auto gpuMemSpaceAttr = memSpaceAttr.dyn_cast_or_null<gpu::AddressSpaceAttr>();
   if (memSpaceAttr && (!gpuMemSpaceAttr || gpuMemSpaceAttr.getValue() !=
                                                gpu::AddressSpace::Private))
-    return emitOpError("source must be private registers");
+    return emitOpError("dest must be private registers");
   ArrayAttr extraViews = getExtraViews();
   ArrayRef<int64_t> inputShape;
   if (extraViews.empty())
@@ -1447,8 +1462,19 @@ LogicalResult ThreadwiseReadIntoOp::verify() {
   else
     inputShape = extraViews[0].cast<TransformMapAttr>().getUpperBounds();
 
-  if (inputShape.size() != 3)
-    return emitOpError("source view must accept (bid, tid, iter) coordinates");
+  MemRefType srcType = getSource().getType().cast<MemRefType>();
+  gpu::AddressSpaceAttr srcMemSpaceAttr =
+      srcType.getMemorySpace().dyn_cast_or_null<gpu::AddressSpaceAttr>();
+  // Unless specified it is assumed to be global
+  gpu::AddressSpace srcGpuMemSpace = gpu::AddressSpace::Global;
+  if (srcMemSpaceAttr) {
+    srcGpuMemSpace = srcMemSpaceAttr.getValue();
+  }
+
+  size_t extraIdxCount = getExtraIndices().size();
+  if (inputShape.size() != extraIdxCount + 1) {
+    return emitOpError("source view must be extraIndices + 1");
+  }
   return success();
 }
 
@@ -1463,15 +1489,24 @@ LogicalResult ThreadwiseWriteAllOp::verify() {
                                                gpu::AddressSpace::Private))
     return emitOpError("source must be private registers");
   ArrayAttr extraViews = getExtraViews();
-  ArrayRef<int64_t> viewInputShape;
+  ArrayRef<int64_t> outputShape;
   if (extraViews.empty())
-    viewInputShape = getDest().getType().getShape();
+    outputShape = getDest().getType().getShape();
   else
-    viewInputShape = extraViews[0].cast<TransformMapAttr>().getUpperBounds();
+    outputShape = extraViews[0].cast<TransformMapAttr>().getUpperBounds();
 
-  if (viewInputShape.size() != 3)
-    return emitOpError(
-        "destination view must accept (bid, tid, iter) coordinates");
+  MemRefType dstType = getDest().getType().cast<MemRefType>();
+  Attribute dstMemSpaceAttr = dstType.getMemorySpace();
+  // Unless specified it is assumed to be global
+  gpu::AddressSpace dstGpuMemSpace = gpu::AddressSpace::Global;
+  if (dstMemSpaceAttr) {
+    dstGpuMemSpace = dstMemSpaceAttr.cast<gpu::AddressSpaceAttr>().getValue();
+  }
+
+  size_t extraIdxCount = getExtraIndices().size();
+  if (outputShape.size() != extraIdxCount + 1) {
+    return emitOpError("dest view must be extraIndices + 1");
+  }
   return success();
 }
 
@@ -1623,6 +1658,135 @@ LogicalResult ReduceOp::verify() {
             "The size of the non-reduction dimension should match the input.");
       }
     }
+  }
+  return success();
+}
+
+//===-----------------------------------------------------===//
+// Blockwise_ReduceOp
+//===-----------------------------------------------------===//
+
+LogicalResult BlockwiseBroadcastReduceOp::verify() {
+  ArrayAttr inputViewArrayAttr = getInputRegViewAttr();
+  // This view should be {tid, iter} to {d0, ... , Dr , ... , dn};
+  // where {d0, ... , Dr , ... , dn} represent a blockwise tile
+  // of a larger tensor that is being reduced.
+  TransformMapAttr inputView = inputViewArrayAttr[0].cast<TransformMapAttr>();
+  ArrayRef<int64_t> inputTensorShape = inputView.getLowerBounds().asArrayRef();
+  ArrayRef<int64_t> inputThreadView = inputView.getUpperBounds().asArrayRef();
+  ArrayRef<int64_t> wsShape = getWorkspaceBuffer().getType().getShape();
+  int64_t blockSize = getBlockSize();
+
+  gpu::AddressSpaceAttr inMemSpaceAttr =
+      getInput()
+          .getType()
+          .getMemorySpace()
+          .dyn_cast_or_null<gpu::AddressSpaceAttr>();
+  if (!inMemSpaceAttr) {
+    return emitError("No gpu memspace attr found in input memref; the input "
+                     "memref should be in regs");
+  } else {
+    if (inMemSpaceAttr.getValue() != gpu::AddressSpace::Private) {
+      return emitError("input should be in regs.");
+    }
+  }
+
+  gpu::AddressSpaceAttr outMemSpaceAttr =
+      getOutput()
+          .getType()
+          .getMemorySpace()
+          .dyn_cast_or_null<gpu::AddressSpaceAttr>();
+  if (!outMemSpaceAttr) {
+    return emitError("No gpu memspace attr found in output memref; the output "
+                     "memref should be in regs");
+  } else {
+    if (outMemSpaceAttr.getValue() != gpu::AddressSpace::Private) {
+      return emitError("output should be in regs.");
+    }
+  }
+
+  gpu::AddressSpaceAttr wsMemSpaceAttr =
+      getWorkspaceBuffer()
+          .getType()
+          .getMemorySpace()
+          .dyn_cast_or_null<gpu::AddressSpaceAttr>();
+  if (!wsMemSpaceAttr) {
+    return emitError("No gpu memspace attr found in workspace memref; the "
+                     "workspace memref should be in LDS");
+  } else {
+    if (wsMemSpaceAttr.getValue() != gpu::AddressSpace::Workgroup) {
+      return emitError("workspace should be in LDS.");
+    }
+  }
+
+  if (inputThreadView[0] != blockSize) {
+    return emitError(
+        "first dimension of the input view should be equal to the block size");
+  }
+  if (wsShape.size() != 1) {
+    return emitError("workspace LDS buffer should be flat");
+  }
+
+  int64_t blockwiseInputTensorElements = 1;
+  for (int64_t dimSize : inputTensorShape) {
+    blockwiseInputTensorElements *= dimSize;
+  }
+  if (blockwiseInputTensorElements > wsShape[0]) {
+    return emitError(
+        "workspace should be at least the size of elements per block");
+  }
+  return success();
+}
+
+//===-----------------------------------------------------===//
+// BlockwiseFillOp
+//===-----------------------------------------------------===//
+
+LogicalResult BlockwiseFillOp::verify() {
+  MemRefType memrefType = getMemref().getType();
+  if (memrefType.getRank() != 1) {
+    return emitError("Blockwise fill expects a flat memref");
+  }
+  if (gpu::AddressSpaceAttr memSpace =
+          memrefType.getMemorySpace()
+              .dyn_cast_or_null<gpu::AddressSpaceAttr>()) {
+    if (memSpace.getValue() != gpu::AddressSpace::Workgroup) {
+      return emitError("Memory space is expected to be workgroup");
+    }
+  } else {
+    return emitError("Memory space is expected to be workgroup");
+  }
+  int64_t numElements = getMemref().getType().getNumElements();
+  if (VectorType vecType = dyn_cast<VectorType>(getValue().getType())) {
+    if (numElements % vecType.getNumElements() != 0) {
+      return emitError("The vector length is not a factor in memref size.");
+    }
+  }
+  return success();
+}
+
+//===-----------------------------------------------------===//
+// AttentionOp
+//===-----------------------------------------------------===//
+
+LogicalResult AttentionOp::verify() {
+  ShapedType qType = getQueries().getType();
+  ArrayRef<int64_t> qLastDims = qType.getShape().slice(qType.getRank() - 2);
+  ShapedType kType = getKeys().getType();
+  ArrayRef<int64_t> kLastDims = kType.getShape().slice(kType.getRank() - 2);
+  ShapedType vType = getValues().getType();
+  ArrayRef<int64_t> vLastDims = vType.getShape().slice(vType.getRank() - 2);
+
+  ShapedType scaleType = getScale().getType();
+
+  if (qLastDims[1] != kLastDims[0]) {
+    return emitError("Q.K requires second dim sizes to match");
+  }
+  if (kLastDims[1] != vLastDims[0]) {
+    return emitError("(Q.K).V requires second dim sizes to match");
+  }
+  if (vType.getRank() != scaleType.getRank()) {
+    return emitError("scale needs to be of same rank to other inputs");
   }
   return success();
 }

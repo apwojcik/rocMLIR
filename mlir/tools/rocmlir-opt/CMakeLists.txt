@@ -12,26 +12,33 @@ set(LLVM_LINK_COMPONENTS
   AsmParser
   )
 
-
 set(LIBS
   ${rocmlir_dialect_libs}
   ${rocmlir_conversion_libs}
   ${rocmlir_test_libs}
   MLIROptLib
+  MLIRMHAL
+  MLIRMHALTransforms
+  MLIRMHALPipeline
   )
 
-# Exclude from libMLIR.so because this has static options intended for
-# opt-like tools only.
+set(disable_install "")
+if (BUILD_FAT_LIBROCKCOMPILER)
+  set(disable_install "DISABLE_INSTALL")
+endif()
+
 add_mlir_library(RocMLIROptMain
   rocmlir-opt.cpp
 
   EXCLUDE_FROM_LIBMLIR
+  ${disable_install}
 
-  LINK_LIBS PUBLIC
+  LINK_LIBS PRIVATE
   ${LIBS}
   )
+set_target_properties(RocMLIROptMain PROPERTIES EXCLUDE_FROM_ALL ${BUILD_FAT_LIBROCKCOMPILER})
 
-add_llvm_tool(rocmlir-opt
+add_rocmlir_tool(rocmlir-opt
   rocmlir-opt.cpp
 
   DEPENDS

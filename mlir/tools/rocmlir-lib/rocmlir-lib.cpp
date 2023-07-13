@@ -44,7 +44,10 @@ struct MiirHandle_s {
     module = ModuleOp::create(UnknownLoc::get(context));
   }
 
-  ~MiirHandle_s() { delete context; }
+  ~MiirHandle_s() {
+    module.release();
+    delete context;
+  }
 
   mlir::MLIRContext &getContext() { return *context; }
 
@@ -98,7 +101,7 @@ LogicalResult RockEnabled(const mlir::rock::Conv2dGenerator::Config &conf) {
   bool layoutSupported =
       supportedLayouts.count(std::make_tuple(inLayout, filLayout, outLayout)) >
       0;
-  bool noBF16 = conf.dataTypeStr != "bf16";
+  bool noBF16 = conf.inputDataTypeStr != "bf16";
   return LogicalResult::success(layoutSupported && noBF16);
 }
 
@@ -110,8 +113,12 @@ static std::mutex mutex;
 extern "C" MiirHandle miirCreateHandle(const char *arguments) {
   const std::lock_guard<std::mutex> lock(mutex);
 
+  MiirHandle_s *handle = new MiirHandle_s;
+  ModuleOp module = handle->getModule();
+  OpBuilder builder(module.getContext());
+
   mlir::rock::Conv2dGenerator conv2dGenerator;
-  if (failed(conv2dGenerator.parseConvConfig(arguments))) {
+  if (failed(conv2dGenerator.parseConvConfig(builder, arguments))) {
     return nullptr;
   }
 
@@ -124,14 +131,9 @@ extern "C" MiirHandle miirCreateHandle(const char *arguments) {
     return nullptr;
   }
 
-  MiirHandle_s *handle = new MiirHandle_s;
-
   handle->triple = config.triple;
   handle->chip = config.chip;
   handle->features = config.chipFeatures;
-
-  ModuleOp module = handle->getModule();
-  OpBuilder builder(module.getContext());
 
   if (failed(conv2dGenerator.getKernelCount(builder, handle->kernelCount))) {
     return nullptr;
@@ -244,7 +246,7 @@ extern "C" MiirStatus miirLowerTuningParams(MiirHandle mlirHandle) {
 
   ModuleOp module = handle->getModule();
 
-  PassManager pm(module.getContext(), PassManager::Nesting::Implicit);
+  PassManager pm(module->getName(), PassManager::Nesting::Implicit);
 
   rock::KernelOptions opts;
   opts.enableApplicability = true;
@@ -264,7 +266,7 @@ extern "C" MiirStatus miirLowerBin(MiirHandle mlirHandle) {
 
   ModuleOp module = handle->getModule();
 
-  PassManager pm(module.getContext(), PassManager::Nesting::Implicit);
+  PassManager pm(module->getName(), PassManager::Nesting::Implicit);
 
   rock::buildKernelPipeline(pm);
 

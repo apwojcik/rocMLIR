@@ -1,6 +1,13 @@
+set(disable_install "")
+if (BUILD_FAT_LIBROCKCOMPILER)
+  set(disable_install "DISABLE_INSTALL")
+endif()
 add_mlir_library(conv-validation-wrappers SHARED
+  EXCLUDE_FROM_LIBMLIR
+  ${disable_install}
   conv-validation-wrappers.cpp
 )
+set_target_properties(conv-validation-wrappers PROPERTIES EXCLUDE_FROM_ALL ${BUILD_FAT_LIBROCKCOMPILER})
 
 target_link_libraries(conv-validation-wrappers
   PUBLIC
@@ -13,3 +20,4 @@ if (NOT MSVC)
   set_source_files_properties(conv-validation-wrappers.cpp PROPERTIES
     COMPILE_OPTIONS "-Wno-gnu-anonymous-struct;-Wno-nested-anon-types;-Wno-return-type-c-linkage;-Wno-c++98-compat-extra-semi")
 endif()
+

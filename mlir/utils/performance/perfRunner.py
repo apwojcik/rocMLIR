@@ -31,9 +31,10 @@ DATA_TYPES = ['conv', 'convfp16', 'convint8']
 LAYOUTS = ['NHWC', 'NCHW']
 
 DATA_TYPES_GEMM = ['f32', 'f16', 'i8']
+OUTPUT_DATA_TYPES_MAP = {'f32':'f32', 'f16':'f16', 'i8':'i32'}
 
 # Compiled regexp object used for extracting elapsed time from MIOpenDriver's output
-ELAPSED_TIME_RE = re.compile(r"Elapsed: (.*)ms")
+ELAPSED_TIME_RE = re.compile(r"Elapsed: ([0-9\.]*) ms")
 # Compiled regexp object used for extracting target chip from arch
 GFX_CHIP_RE = re.compile(r"gfx[0-9a-z]+")
 
@@ -43,7 +44,6 @@ class MLIRPaths:
     rocmlir_driver_path : str
     rocmlir_opt_path : str
     cpu_runner_path : str
-    xmir_runner_path : str
     libmlir_rocm_runtime_path : str
     libconv_validation_wrappers_path : str
     libmlir_runtime_utils_path : str
@@ -138,7 +138,6 @@ def create_paths(config_file_path, mlir_build_dir_path, miopen_build_dir_path) -
             rocmlir_driver_path = mlir_bin_dir + '/rocmlir-driver',
             rocmlir_opt_path = mlir_bin_dir + '/rocmlir-opt',
             cpu_runner_path = llvm_bin_dir + '/mlir-cpu-runner',
-            xmir_runner_path = mlir_bin_dir + '/xmir-runner',
             libmlir_rocm_runtime_path =  llvm_lib_dir + '/libmlir_rocm_runtime.so',
             libconv_validation_wrappers_path = mlir_lib_dir + '/libconv-validation-wrappers.so',
             libmlir_runtime_utils_path = llvm_lib_dir + '/libmlir_runner_utils.so',
@@ -465,7 +464,7 @@ class ConvConfiguration(PerfConfiguration):
     @classmethod
     def benchmarkExternal(cls, commandLine, paths: Paths, arch, envs=dict()):
         config = cls.fromCommandLine(commandLine, arch)
-        MIOpenDriverCommand = [paths.miopen_driver_path, *commandLine, '-V', '0']
+        MIOpenDriverCommand = [paths.miopen_driver_path, *commandLine, '-V', '0', '-t', '1']
         print("Running MIOpen Benchmark: ", ' '.join(commandLine))
         # invoke MIOpenDriver.
         p1 = subprocess.Popen(MIOpenDriverCommand, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=envs)
@@ -475,6 +474,8 @@ class ConvConfiguration(PerfConfiguration):
             outs, errs = p1.communicate(timeout=300)
             if len(errs) > 0:
                 print("MIOpen benchmark produced errors: ", errs.decode('utf-8'))
+                if p1.returncode != 0:
+                    raise OSError(errs.decode('utf-8'))
             else:
                 # convert bytes to str
                 outs = outs.decode('utf-8')
@@ -489,8 +490,10 @@ class ConvConfiguration(PerfConfiguration):
             outs, errs = p1.communicate()
         return config.tableEntry(nanoSeconds)
 
-def getGemmConfigurations(fileName):
+def getGemmConfigurations(fileName, dataTypes=DATA_TYPES_GEMM, outDataTypeMap=OUTPUT_DATA_TYPES_MAP):
     configs = []
+    outDataType = None
+
     if fileName:
         with open(fileName, 'r') as configFile:
             lines = configFile.readlines()
@@ -501,6 +504,8 @@ def getGemmConfigurations(fileName):
                 line = line.strip()
                 # Skip empty lines
                 if len(line) == 0 or line[0] == '#':
+                    continue
+                if datatype not in dataTypes:
                     continue
 
                 # We need trailing spaces here to account for the concat below
@@ -519,8 +524,13 @@ def getGemmConfigurations(fileName):
                 if "-transB " not in line:
                     transBString = f"-transB {transB} "
 
+                # Skip out_datatype if already in
+                outDataTypeString = ""
+                if "-out_datatype" not in line:
+                     outDataTypeString = "-out_datatype " + outDataTypeMap.get(datatype, datatype) + " "
+
                 # Strip to avoid spurious spaces
-                oneConfig = f"{dataTypeString}{transAString}{transBString}{line}".strip()
+                oneConfig = f"{dataTypeString}{outDataTypeString}{transAString}{transBString}{line}".strip()
                 if oneConfig not in configs:
                     configs.append(oneConfig)
     return configs
@@ -535,7 +545,7 @@ class GemmConfiguration(PerfConfiguration):
     def tableEntry(self, nanoSeconds):
         # Future(kdrewnia): This can just be a dict literal on Python 3.7+
         result = OrderedDict()
-        values = [self.dataType, self.chip, self.transA, self.transB, \
+        values = [self.dataType, self.outDataType, self.chip, self.transA, self.transB, \
                    self.g, self.m, self.k, self.n, self.perfConfig, self.computeTFlops(nanoSeconds)]
         assert(len(self.TABLE_COLUMNS) == len(values))
 
@@ -544,7 +554,7 @@ class GemmConfiguration(PerfConfiguration):
         return result
 
     def __repr__(self):
-        return f"""GemmConfiguration(dtype={self.dataType!r}, g={self.g!r}, m={self.m!r}, k={self.k!r}, n={self.n!r},
+        return f"""GemmConfiguration(dtype={self.dataType!r}, outDataType={self.outDataType!r}, g={self.g!r}, m={self.m!r}, k={self.k!r}, n={self.n!r},
                 transA={self.transA!r}, transB={self.transB!r}, arch={self.arch!r}, perf_config={self.perfConfig})"""
 
     def setPerfConfig(self, perf_config):
@@ -595,20 +605,23 @@ class GemmConfiguration(PerfConfiguration):
                 transA = (val.lower() in ["1", "true"])
             elif opt.endswith("-transB"):
                 transB = (val.lower() in ["1", "true"])
+            elif opt.endswith("-out_datatype"):
+                outDataType =val.lower()
             else:
                 raise ValueError(f"Unknown GEMM config argument {opt} -> {val}")
-        for v in [dtype, g, m, k, n, transA, transB]:
+        for v in [dtype, outDataType, g, m, k, n, transA, transB]:
             if v is None:
                 raise ValueError("Incomplete GEMM configuration")
 
-        return cls(dtype, g, m, k, n, transA, transB, arch)
+        return cls(dtype, outDataType, g, m, k, n, transA, transB, arch)
 
-    def __init__(self, dtype: str, g: int, m: int, k: int, n: int,
+    def __init__(self, dtype: str, outDataType: str, g: int, m: int, k: int, n: int,
                  transA: bool, transB: bool, arch: str):
         if dtype not in {"f16", "f32", "bf16", "i8"}:
             raise ValueError(f"Invalid datatype: {dtype}")
         self.MLIR_N_REPEATS = 5
         self.dataType = dtype
+        self.outDataType = outDataType
         self.g = g
         self.m = m
         self.k = k
@@ -630,7 +643,7 @@ class RocBLASGemmConfig(GemmConfiguration):
             raise ValueError("rocblas-benchmark-driver not built")
         benchmarkArgs = config.generateMlirDriverCommandLine("")
         # remove the result file generated by rocprof in previous benchmarking
-        os.system("rm "+BENCHMARKING_RESULT_FILE_NAME)
+        os.system("rm -f "+BENCHMARKING_RESULT_FILE_NAME)
 
         print(f"Running rocBLAS benchmark {config!r}")
         profilerCommand = [ROCPROF, '--stats', \
@@ -644,6 +657,8 @@ class RocBLASGemmConfig(GemmConfiguration):
             if len(errs) > 0:
                 print("Test printed errors: ", errs.decode('utf-8'))
                 print("Failing command line: ", profilerCommand)
+                if p1.returncode != 0:
+                    raise OSError(errs.decode('utf-8'))
         except subprocess.TimeoutExpired:
             print("Test timed out: ", profilerCommand)
             p.kill()
@@ -675,6 +690,8 @@ class CKGemmConfig(GemmConfiguration):
             if len(errs) > 0:
                 print("Test printed errors: ", errs.decode('utf-8'))
                 print("Failing command line: ", profilerCommand)
+                if p1.returncode != 0:
+                    raise OSError(errs.decode('utf-8'))
         except subprocess.TimeoutExpired:
             print("Test timed out: ", profilerCommand)
             p.kill()
@@ -685,7 +702,7 @@ class CKGemmConfig(GemmConfiguration):
 
 def runConfigWithMLIR(config: PerfConfiguration, paths: Paths, rocmlir_gen_flags, debug=True):
     # remove the result file generated by rocprof in previous benchmarking
-    os.system("rm "+BENCHMARKING_RESULT_FILE_NAME)
+    os.system("rm -f "+BENCHMARKING_RESULT_FILE_NAME)
     commandLineOptions = config.generateMlirDriverCommandLine(rocmlir_gen_flags)
     if debug:
         print("Running MLIR Benchmark: ", repr(config))
@@ -708,6 +725,8 @@ def runConfigWithMLIR(config: PerfConfiguration, paths: Paths, rocmlir_gen_flags
         if len(errs) > 0:
             print("Test printed errors: ", errs.decode('utf-8'))
             print("Failing command line: ", rocmlirGenCommand)
+            if p1.returncode != 0:
+                raise OSError(errs.decode('utf-8'))
     except subprocess.TimeoutExpired:
         print("Test timed out: ", rocmlirGenCommand)
         p3.kill()
@@ -830,7 +849,7 @@ def getFusionTestInfo(filename, paths: Paths):
     if "-migraphx-to-tosa" in firstCommand:
         rocmlirOptCommand = [paths.mlir_paths.rocmlir_opt_path, '-migraphx-to-tosa', filename]
         rocmlirDriverCommand = [paths.mlir_paths.rocmlir_driver_path, '-host-pipeline', 'partition,highlevel', '-targets', getChip()]
-        # rocmlir-opt -migraphx-to-tosa ../mlir/test/fusion/e2e/resnet50/mixr-resnet-fusion-case-1.mlir
+        # rocmlir-opt -migraphx-to-tosa ../mlir/test/fusion/resnet50-e2e/mixr-resnet-fusion-case-1.mlir
         p1 = subprocess.Popen(rocmlirOptCommand, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         # pipe to rocmlir-driver -host-pipeline partition,highlevel -targets gfx90a
         p2 = subprocess.Popen(rocmlirDriverCommand, stdin=p1.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -850,13 +869,13 @@ def getFusionTestInfo(filename, paths: Paths):
     return testEntry
 
 def runFusionKernel(filename, rocmlirGenArgs, paths: Paths):
-    os.system("rm "+BENCHMARKING_RESULT_FILE_NAME)
+    os.system("rm -f "+BENCHMARKING_RESULT_FILE_NAME)
 
     firstCommand, _ = findRunCommand(filename)
     if "-migraphx-to-tosa" in firstCommand:
         rocmlirOptCommand = [paths.mlir_paths.rocmlir_opt_path, '-migraphx-to-tosa', filename]
         rocmlirDriverCommand = [paths.mlir_paths.rocmlir_driver_path, '-host-pipeline', 'partition,highlevel', '-targets', getChip()]
-        # rocmlir-opt -migraphx-to-tosa ../mlir/test/fusion/e2e/resnet50/mixr-resnet-fusion-case-1.mlir
+        # rocmlir-opt -migraphx-to-tosa ../mlir/test/fusion/resnet50-e2e/mixr-resnet-fusion-case-1.mlir
         p1 = subprocess.Popen(rocmlirOptCommand, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         # pipe to rocmlir-driver -host-pipeline partition,highlevel -targets gfx90a
         p2 = subprocess.Popen(rocmlirDriverCommand, stdin=p1.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -867,13 +886,13 @@ def runFusionKernel(filename, rocmlirGenArgs, paths: Paths):
         p2 = subprocess.Popen(rocmlirDriverCommand, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
     rocmlirGenCommand = [paths.mlir_paths.rocmlir_gen_path] + rocmlirGenArgs
-    kernelPipelineCommand = [paths.mlir_paths.rocmlir_driver_path, '-host-pipeline', 'xmodel', '-kernel-pipeline','full']
-    xmir_runner_args = [f'--shared-libs={paths.mlir_paths.libmlir_rocm_runtime_path},{paths.mlir_paths.libconv_validation_wrappers_path},{paths.mlir_paths.libmlir_runtime_utils_path}', '--entry-point-result=void']
-    profilerCommand = [ROCPROF, '--stats', paths.mlir_paths.xmir_runner_path] + xmir_runner_args
+    kernelPipelineCommand = [paths.mlir_paths.rocmlir_driver_path, '-host-pipeline', 'mhal,runner', '-kernel-pipeline','full']
+    mlir_cpu_runner_args = [f'--shared-libs={paths.mlir_paths.libmlir_rocm_runtime_path},{paths.mlir_paths.libconv_validation_wrappers_path},{paths.mlir_paths.libmlir_runtime_utils_path}', '--entry-point-result=void']
+    profilerCommand = [ROCPROF, '--stats', paths.mlir_paths.cpu_runner_path] + mlir_cpu_runner_args
     # pipe to rocmlir-gen -ph --perf_config
     p3 = subprocess.Popen(rocmlirGenCommand, stdin=p2.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     p2.stdout.close()
-    # pipe to rocmlir-driver -host-pipeline xmodel -kernel-pipeline full
+    # pipe to rocmlir-driver -host-pipeline mhal,runner -kernel-pipeline full
     p4 = subprocess.Popen(kernelPipelineCommand, stdin=p3.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     p3.stdout.close()
     profiling = subprocess.Popen(profilerCommand, stdin=p4.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -985,6 +1004,8 @@ def tuneMLIRKernels(configs, paths: Paths, arch):
             # get output.
             try:
                outs, errs = p1.communicate(timeout=300)
+               if len(errs) > 0 and p1.returncode != 0:
+                   raise OSError(errs.decode('utf-8'))
             except subprocess.TimeoutExpired:
                 p1.kill()
                 print("MIOpen tuning timed out")
@@ -1012,6 +1033,21 @@ def getArch():
                               check=True, stdout=subprocess.PIPE)
         agents = set(x.decode("utf-8") for x in q.stdout.split() if x != b"gfx000")
     return agents
+
+def parseDataTypes(data_types):
+    if not data_types:
+        return DATA_TYPES_GEMM, OUTPUT_DATA_TYPE_MAP
+
+    datatypes = []
+    outMap = {}
+    for dpair in data_types:
+        dt = dpair.split('_')
+        datatypes.append(dt[0])
+        outMap[dt[0]] = 'i32' if dt[0] == 'i8' else dt[0]
+        if len(dt) == 2:
+            outMap[dt[0]] = dt[1]
+
+    return datatypes, outMap
 
 def getChip():
     archNames = getArch()
@@ -1058,7 +1094,7 @@ def main(args=None):
     chip = GFX_CHIP_RE.search(arch).group(0)
 
     root_dir = str(subprocess.check_output(['git', 'rev-parse', '--show-toplevel']).decode().strip())
-    default_conv_configs = root_dir + '/mlir/utils/jenkins/miopen-tests/resnet50-miopen-configs'
+    default_conv_configs = root_dir + '/mlir/utils/jenkins/miopen-tests/important-conv-configs'
 
     parser = argparse.ArgumentParser(
         prog="rocMLIR performance test runner",
@@ -1131,7 +1167,7 @@ def main(args=None):
     parser.add_argument(
         "--test_dir",
         type=str,
-        default="../mlir/test/fusion/e2e/resnet50",
+        default="../mlir/test/fusion/resnet50-e2e",
         help="The directory of tests"
     )
     parser.add_argument(
@@ -1167,6 +1203,13 @@ def main(args=None):
         help="(rocBLAS | CK) external library to run GEMM routines"
     )
 
+    parser.add_argument(
+        '--data-type',
+         nargs='+',
+         choices=["f32", "f16", "i8", "i8_i32", "i8_i8"],
+         default=["f32", "f16", "i8"],
+         help='Force a set of datatypes'
+    )
 
     parsed_args = parser.parse_args(args)
 
@@ -1193,9 +1236,6 @@ def main(args=None):
             confClass = RocBLASGemmConfig
         elif externalLib == GEMMLibrary.CK:
             confClass = CKGemmConfig
-            # Make MLIR to be compatible with CK by forcing int8xint8->int8
-            # This flag is ignored by non-int8 test cases.
-            rocmlir_gen_flags += "--out_datatype=i8"
 
     configs_path = None if parsed_args.config else parsed_args.configs_file
     paths = create_paths(configs_path, parsed_args.mlir_build_dir, parsed_args.miopen_build_dir)
@@ -1203,7 +1243,8 @@ def main(args=None):
     if opType == Operation.CONV:
         configs = getConvConfigurations(paths.configuration_file_path)
     elif opType == Operation.GEMM:
-        configs = getGemmConfigurations(paths.configuration_file_path)
+        datatypes, outputTypeMap = parseDataTypes(parsed_args.data_type)
+        configs = getGemmConfigurations(paths.configuration_file_path, datatypes, outputTypeMap)
 
     if parsed_args.external or parsed_args.batch_external or parsed_args.batch_all:
         if not foundExternalTool(paths, opType, externalLib):

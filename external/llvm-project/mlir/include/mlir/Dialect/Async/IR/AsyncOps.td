@@ -33,80 +33,6 @@ include "mlir/IR/OpAsmInterface.td"
 class Async_Op<string mnemonic, list<Trait> traits = []> :
     Op<AsyncDialect, mnemonic, traits>;
 
-def Async_LaunchOp :
-  Async_Op<"launch", [DeclareOpInterfaceMethods<CallOpInterface,
-                      ["getCallResults", "getCallResultTypes"]>,
-                      DeclareOpInterfaceMethods<SymbolUserOpInterface>,
-                      AttrSizedOperandSegments]> {
-  let summary = "Asynchronous launch operation";
-  let description = [{
-    The `async.launch` operation encapsulates a call to a `kernel` func that
-    may run asynchronously from the caller. An `async.token` is returned to
-    maintain ordered dependent execution. Subsequent instructions that depend
-    on results from the `async.launch` must either be dependent on the token
-    or be preceded by an `async.await` of that token.
-
-    The actual concurrency semantics depends on the dialect lowering to the
-    executable format. Fully sequential execution ("compute0" completes before
-    "compute1" starts) is a completely legal execution.
-
-    Because concurrent execution is not guaranteed, it is undefined behavior
-    to create an implicit dependency from "compute1" to "compute0" (e.g. via
-    shared global state). All dependencies must be made explicit with async
-    launch arguments (i.e. `async.token`).
-
-   `async.launch` operation takes `async.token` dependencies and operands
-    separately, and starts execution of the kernel function only when all
-    tokens become ready. In contrast to `async.execute` this operation does
-    not depend on operand values as `async.value` requires.
-
-    Example:
-
-    ```mlir
-    %dependency = ... : !async.token
-
-    %token, %results =
-      async.launch @compute0 [%dependency] (%value0, %value1) :
-                 (some.type, some.type) -> some.type
-
-    %1 = "compute1"(...) : !some.type
-    ```
-
-    In the example above asynchronous execution starts only after dependency
-    token becomes ready.
-  }];
-
-  let arguments = (ins FlatSymbolRefAttr:$callee,
-                       Variadic<Async_TokenType>:$dependencies,
-                       Variadic<AnyType>:$launchOperands);
-
-  let results = (outs Async_TokenType:$token,
-                      Variadic<AnyType>:$results);
-
-  let builders = [
-    OpBuilder<(ins "func::FuncOp":$kernelFunc, "ValueRange":$dependencies,
-                   "ValueRange":$kernelOperands)>,
-    OpBuilder<(ins "FlatSymbolRefAttr":$callee, "TypeRange":$results,
-      CArg<"ValueRange", "{}">:$launchOperands), [{
-      $_state.addOperands(launchOperands);
-      $_state.addAttribute("callee", callee);
-      $_state.addTypes(results);
-      auto operandSegmentSizes = $_builder.getDenseI32ArrayAttr(
-        {0, static_cast<int32_t>(launchOperands.size())});
-      $_state.addAttribute(getOperandSegmentSizesAttrName($_state.name),
-                           operandSegmentSizes);
-
-    }]>,
-  ];
-
-  let extraClassDeclaration = [{
-    void updateSegmentSizes(MLIRContext *);
-  }];
-
-  let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
-}
-
 def Async_ExecuteOp :
   Async_Op<"execute", [SingleBlockImplicitTerminator<"YieldOp">,
                        DeclareOpInterfaceMethods<RegionBranchOpInterface,
@@ -243,6 +169,18 @@ def Async_FuncOp : Async_Op<"func",
     ArrayRef<Type> getCallableResults() { return getFunctionType()
                                                     .getResults(); }
 
+    /// Returns the argument attributes for all callable region arguments or
+    /// null if there are none.
+    ::mlir::ArrayAttr getCallableArgAttrs() {
+      return getArgAttrs().value_or(nullptr);
+    }
+
+    /// Returns the result attributes for all callable region results or
+    /// null if there are none.
+    ::mlir::ArrayAttr getCallableResAttrs() {
+      return getResAttrs().value_or(nullptr);
+    }
+
     //===------------------------------------------------------------------===//
     // FunctionOpInterface Methods
     //===------------------------------------------------------------------===//
@@ -336,6 +274,11 @@ def Async_CallOp : Async_Op<"call",
     /// Return the callee of this operation.
     CallInterfaceCallable getCallableForCallee() {
       return (*this)->getAttrOfType<SymbolRefAttr>("callee");
+    }
+
+    /// Set the callee for this operation.
+    void setCalleeFromCallable(CallInterfaceCallable callee) {
+      (*this)->setAttr("callee", callee.get<SymbolRefAttr>());
     }
   }];
 
@@ -702,7 +645,7 @@ def Async_RuntimeAwaitAndResumeOp : Async_Op<"runtime.await_and_resume"> {
 def Async_RuntimeStoreOp : Async_Op<"runtime.store",
       [TypesMatchWith<"type of 'value' matches element type of 'storage'",
                      "storage", "value",
-                     "$_self.cast<ValueType>().getValueType()">]> {
+                     "::llvm::cast<ValueType>($_self).getValueType()">]> {
   let summary = "stores the value into the runtime async.value";
   let description = [{
     The `async.runtime.store` operation stores the value into the runtime
@@ -717,7 +660,7 @@ def Async_RuntimeStoreOp : Async_Op<"runtime.store",
 def Async_RuntimeLoadOp : Async_Op<"runtime.load",
       [TypesMatchWith<"type of 'value' matches element type of 'storage'",
                      "storage", "result",
-                     "$_self.cast<ValueType>().getValueType()">]> {
+                     "::llvm::cast<ValueType>($_self).getValueType()">]> {
   let summary = "loads the value from the runtime async.value";
   let description = [{
     The `async.runtime.load` operation loads the value from the runtime
