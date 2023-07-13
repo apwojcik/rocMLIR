@@ -6,9 +6,7 @@ set(LIBS
   ${rocmlir_capi_libs}
 )
 
-if(NOT WIN32)
-    set(CMAKE_BUILD_RPATH ${CMAKE_BUILD_DIR}/external/llvm-project/llvm/lib)
-endif()
+set(CMAKE_BUILD_RPATH ${CMAKE_BUILD_DIR}/external/llvm-project/llvm/lib)
 
 llvm_add_library(MLIRRockThin
 PARTIAL_SOURCES_INTENDED
@@ -36,7 +34,7 @@ mlir_check_link_libraries(rocmlir-lib-test)
 llvm_canonicalize_cmake_booleans(BUILD_FAT_LIBROCKCOMPILER)
 # Static library target, enabled only when building static libs
 if(BUILD_FAT_LIBROCKCOMPILER)
-  find_package(ROCM 0.8 REQUIRED)
+  find_package(ROCM 0.8 REQUIRED PATHS /opt/rocm)
   include(ROCMInstallTargets)
   include(ROCMCreatePackage)
 
@@ -139,7 +137,7 @@ if(BUILD_FAT_LIBROCKCOMPILER)
   # as part of component rockCompiler
   rocm_install(FILES Miir.h
     DESTINATION include/${PACKAGE_NAME})
-  
+
   # Install a target, i.e. ${package_name}::${component_name}, as part of
   # devel component and export it to be searchable by find_package().
   # The include directories are propagated to the downstream targets
@@ -193,7 +191,7 @@ if(BUILD_FAT_LIBROCKCOMPILER)
       NAME ${package_name}
       TARGETS ${package_name}
       COMPATIBILITY AnyNewerVersion
-    )
+      )
 
   endfunction()
 
@@ -244,13 +242,11 @@ if(BUILD_FAT_LIBROCKCOMPILER)
     EXTRA_INCLUDES              # extra include directories
     ${extra_include_dir}
   )
-  
+
   rocm_create_package(
     NAME ${CMAKE_PROJECT_NAME}
     DESCRIPTION "MLIR packages"
     MAINTAINER "rocMLIR Dev Team dl.dl-mlir@amd.com"
     HEADER_ONLY
   )
-
 endif()
-  

@@ -1,5 +1,6 @@
-find_package(rocblas CONFIG)
-if(rocblas_FOUND)
+find_package(rocblas CONFIG HINTS /opt/rocm)
+
+if (rocblas_FOUND)
   set(LIBS ${rocblas_LIBRARY} benchmark-driver-utils)
 
   add_executable(rocblas-benchmark-driver

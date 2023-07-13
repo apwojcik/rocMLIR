@@ -1,4 +1,5 @@
-find_package(hip)
+find_package(hip PATHS /opt/rocm)
+
 if (hip_FOUND)
   add_library(benchmark-driver-utils EXCLUDE_FROM_ALL benchmarkUtils.cpp)
   target_link_libraries(benchmark-driver-utils PUBLIC hip::host hip::amdhip64)
